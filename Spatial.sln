@@ -1,0 +1,46 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.Physics", "Spatial.Physics\Spatial.Physics.csproj", "{B6607F9D-5DE7-4913-BE0D-AA73745CC1DE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.Pathfinding", "Spatial.Pathfinding\Spatial.Pathfinding.csproj", "{071E40B5-9B0B-43E9-9C40-8EEC2B0213BE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.Integration", "Spatial.Integration\Spatial.Integration.csproj", "{0BE565EB-9E20-47BC-9D24-62891E919E90}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.TestHarness", "Spatial.TestHarness\Spatial.TestHarness.csproj", "{5A665C5E-EEEF-4CE8-985F-A737741406E5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.Server", "Spatial.Server\Spatial.Server.csproj", "{70593768-E649-4D03-B805-DFB323E4EDCC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B6607F9D-5DE7-4913-BE0D-AA73745CC1DE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6607F9D-5DE7-4913-BE0D-AA73745CC1DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6607F9D-5DE7-4913-BE0D-AA73745CC1DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6607F9D-5DE7-4913-BE0D-AA73745CC1DE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{071E40B5-9B0B-43E9-9C40-8EEC2B0213BE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{071E40B5-9B0B-43E9-9C40-8EEC2B0213BE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{071E40B5-9B0B-43E9-9C40-8EEC2B0213BE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{071E40B5-9B0B-43E9-9C40-8EEC2B0213BE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0BE565EB-9E20-47BC-9D24-62891E919E90}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0BE565EB-9E20-47BC-9D24-62891E919E90}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0BE565EB-9E20-47BC-9D24-62891E919E90}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0BE565EB-9E20-47BC-9D24-62891E919E90}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5A665C5E-EEEF-4CE8-985F-A737741406E5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5A665C5E-EEEF-4CE8-985F-A737741406E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5A665C5E-EEEF-4CE8-985F-A737741406E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5A665C5E-EEEF-4CE8-985F-A737741406E5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{70593768-E649-4D03-B805-DFB323E4EDCC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{70593768-E649-4D03-B805-DFB323E4EDCC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{70593768-E649-4D03-B805-DFB323E4EDCC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{70593768-E649-4D03-B805-DFB323E4EDCC}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

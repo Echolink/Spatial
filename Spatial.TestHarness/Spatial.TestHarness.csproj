@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Spatial.Physics\Spatial.Physics.csproj" />
+    <ProjectReference Include="..\Spatial.Pathfinding\Spatial.Pathfinding.csproj" />
+    <ProjectReference Include="..\Spatial.Integration\Spatial.Integration.csproj" />
+    <ProjectReference Include="..\Spatial.Server\Spatial.Server.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
