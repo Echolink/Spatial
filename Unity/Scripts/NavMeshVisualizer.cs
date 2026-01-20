@@ -95,19 +95,28 @@ namespace Spatial.Unity
             var mesh = new Mesh();
             mesh.name = "NavMesh";
             
-            // Convert vertices
+            // Convert vertices with coordinate system transformation
+            // Unity uses left-handed coordinate system, server uses right-handed
+            // Negate X-axis to match Unity's OBJ importer behavior
             Vector3[] vertices = new Vector3[navMesh.Vertices.Count];
             for (int i = 0; i < navMesh.Vertices.Count; i++)
             {
                 var v = navMesh.Vertices[i];
                 if (v.Length >= 3)
                 {
-                    vertices[i] = new Vector3(v[0], v[1], v[2]);
+                    vertices[i] = new Vector3(-v[0], v[1], v[2]);
                 }
             }
             
-            // Convert indices
-            int[] triangles = navMesh.Indices.ToArray();
+            // Convert indices and reverse winding order
+            // When we flip X-axis, we need to reverse triangle winding to maintain correct normals
+            int[] triangles = new int[navMesh.Indices.Count];
+            for (int i = 0; i < navMesh.Indices.Count; i += 3)
+            {
+                triangles[i] = navMesh.Indices[i];
+                triangles[i + 1] = navMesh.Indices[i + 2]; // Swap indices 1 and 2
+                triangles[i + 2] = navMesh.Indices[i + 1];
+            }
             
             mesh.vertices = vertices;
             mesh.triangles = triangles;
@@ -159,14 +168,16 @@ namespace Spatial.Unity
                 pathLine.positionCount = 0;
             }
             
-            // Update line positions
+            // Update line positions with coordinate system transformation
+            // Unity uses left-handed coordinate system, server uses right-handed
+            // Negate X-axis to match Unity's OBJ importer behavior
             pathLine.positionCount = path.Waypoints.Count;
             for (int i = 0; i < path.Waypoints.Count; i++)
             {
                 var wp = path.Waypoints[i];
                 if (wp.Length >= 3)
                 {
-                    pathLine.SetPosition(i, new Vector3(wp[0], wp[1], wp[2]));
+                    pathLine.SetPosition(i, new Vector3(-wp[0], wp[1], wp[2]));
                 }
             }
             
@@ -221,11 +232,13 @@ namespace Spatial.Unity
                     waypointObjects.Add(waypointObj);
                 }
                 
-                // Update position
+                // Update position with coordinate system transformation
+                // Unity uses left-handed coordinate system, server uses right-handed
+                // Negate X-axis to match Unity's OBJ importer behavior
                 var wp = waypoints[i];
                 if (wp.Length >= 3)
                 {
-                    waypointObj.transform.position = new Vector3(wp[0], wp[1], wp[2]);
+                    waypointObj.transform.position = new Vector3(-wp[0], wp[1], wp[2]);
                 }
             }
         }

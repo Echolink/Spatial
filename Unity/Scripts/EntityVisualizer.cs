@@ -230,20 +230,31 @@ namespace Spatial.Unity
                 Mesh mesh = new Mesh();
                 mesh.name = $"Entity_{state.Id}_Mesh";
                 
-                // Convert vertex data
+                // Convert vertex data with coordinate system transformation
+                // Unity uses left-handed coordinate system, server uses right-handed
+                // Negate X-axis to match Unity's OBJ importer behavior
                 Vector3[] vertices = new Vector3[state.Mesh.Vertices.Count];
                 for (int i = 0; i < state.Mesh.Vertices.Count; i++)
                 {
                     var v = state.Mesh.Vertices[i];
                     if (v.Length >= 3)
                     {
-                        vertices[i] = new Vector3(v[0], v[1], v[2]);
+                        vertices[i] = new Vector3(-v[0], v[1], v[2]);
                     }
                 }
                 
-                // Set mesh data
+                // Set mesh data with reversed winding order
+                // When we flip X-axis, we need to reverse triangle winding to maintain correct normals
+                int[] triangles = new int[state.Mesh.Indices.Count];
+                for (int i = 0; i < state.Mesh.Indices.Count; i += 3)
+                {
+                    triangles[i] = state.Mesh.Indices[i];
+                    triangles[i + 1] = state.Mesh.Indices[i + 2]; // Swap indices 1 and 2
+                    triangles[i + 2] = state.Mesh.Indices[i + 1];
+                }
+                
                 mesh.vertices = vertices;
-                mesh.triangles = state.Mesh.Indices.ToArray();
+                mesh.triangles = triangles;
                 
                 // Recalculate normals and bounds
                 mesh.RecalculateNormals();
@@ -319,8 +330,11 @@ namespace Spatial.Unity
                     yOffset = -capsuleHeight * 0.5f;  // Move down by half height so feet touch ground
                 }
                 
+                // Apply coordinate system transformation
+                // Unity uses left-handed coordinate system, server uses right-handed
+                // Negate X-axis to match Unity's OBJ importer behavior
                 entityObj.transform.position = new Vector3(
-                    state.Position[0],
+                    -state.Position[0],
                     state.Position[1] + yOffset,  // Apply feet-pivot offset for capsules
                     state.Position[2]
                 );
@@ -343,7 +357,10 @@ namespace Spatial.Unity
                 if (state.Velocity.Length >= 3)
                 {
                     Vector3 position = entityObj.transform.position;
-                    Vector3 velocity = new Vector3(state.Velocity[0], state.Velocity[1], state.Velocity[2]);
+                    // Apply coordinate system transformation to velocity
+                    // Unity uses left-handed coordinate system, server uses right-handed
+                    // Negate X-axis to match Unity's OBJ importer behavior
+                    Vector3 velocity = new Vector3(-state.Velocity[0], state.Velocity[1], state.Velocity[2]);
                     
                     velocityLine.SetPosition(0, position);
                     velocityLine.SetPosition(1, position + velocity * velocityVectorScale);
