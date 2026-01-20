@@ -26,6 +26,16 @@ public class EntityState
     public float[] Velocity { get; set; } = new float[3]; // [x,y,z]
     public bool IsStatic { get; set; }
     public string ShapeType { get; set; } = "Box"; // Box, Capsule, Sphere, etc.
+    public MeshGeometry? Mesh { get; set; } // Optional mesh data for mesh entities
+}
+
+/// <summary>
+/// Mesh geometry data for entity visualization
+/// </summary>
+public class MeshGeometry
+{
+    public List<float[]> Vertices { get; set; } = new(); // List of [x,y,z]
+    public List<int> Indices { get; set; } = new(); // Triangle indices (groups of 3)
 }
 
 /// <summary>

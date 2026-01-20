@@ -25,6 +25,9 @@ public class PhysicsWorld : IDisposable
     private CollisionHandler _collisionHandler;
     private readonly PhysicsConfiguration _config;
     
+    // Ground contact callbacks holder (can be updated after creation)
+    private readonly GroundContactCallbacks _groundContactCallbacks;
+    
     /// <summary>
     /// Gets the entity registry for looking up entities.
     /// </summary>
@@ -42,13 +45,17 @@ public class PhysicsWorld : IDisposable
     {
         _config = config ?? new PhysicsConfiguration();
         
+        // Create ground contact callbacks holder (can be updated later)
+        _groundContactCallbacks = new GroundContactCallbacks();
+        
         // Create BufferPool - BepuPhysics v2 recommended pattern
         // BufferPool reuses memory efficiently, improving performance
         _bufferPool = new BufferPool();
         
-        // Create collision handler
+        // Create collision handler with ground contact callbacks holder
         _entityRegistry = new PhysicsEntityRegistry();
-        _collisionHandler = new CollisionHandler(_entityRegistry, onCollision);
+        _collisionHandler = new CollisionHandler(_entityRegistry, onCollision, 
+            groundContactCallbacks: _groundContactCallbacks);
         
         // Create simulation with our collision handler
         // NarrowPhaseCallbacks handles collision detection
@@ -63,6 +70,19 @@ public class PhysicsWorld : IDisposable
             poseIntegrator,
             solveDescription
         );
+    }
+    
+    /// <summary>
+    /// Registers ground contact callbacks for character controller integration.
+    /// These callbacks are called when dynamic entities make/lose contact with static ground.
+    /// Can be called after PhysicsWorld creation - callbacks are stored in a mutable holder.
+    /// </summary>
+    public void RegisterGroundContactCallbacks(
+        Action<PhysicsEntity, PhysicsEntity>? onGroundContact,
+        Action<PhysicsEntity, PhysicsEntity>? onGroundContactRemoved)
+    {
+        _groundContactCallbacks.OnGroundContact = onGroundContact;
+        _groundContactCallbacks.OnGroundContactRemoved = onGroundContactRemoved;
     }
     
     /// <summary>
@@ -101,7 +121,7 @@ public class PhysicsWorld : IDisposable
         
         if (isStatic)
         {
-            // In BepuPhysics v2, static bodies go in the Statics collection
+            // In BepuPhysics v2, static bodies go in the Statics collection  
             var staticDescription = new StaticDescription(
                 position,
                 Quaternion.Identity,
@@ -140,13 +160,14 @@ public class PhysicsWorld : IDisposable
     /// <summary>
     /// Registers a new entity with pre-computed inertia (recommended for dynamic bodies).
     /// </summary>
-    public PhysicsEntity RegisterEntityWithInertia(int entityId, EntityType entityType, Vector3 position, TypedIndex shape, BodyInertia inertia, bool isStatic = false)
+    /// <param name="disableGravity">If true, gravity will not affect this entity (useful for navmesh-controlled agents)</param>
+    public PhysicsEntity RegisterEntityWithInertia(int entityId, EntityType entityType, Vector3 position, TypedIndex shape, BodyInertia inertia, bool isStatic = false, bool disableGravity = false)
     {
         PhysicsEntity entity;
         
         if (isStatic)
         {
-            // In BepuPhysics v2, static bodies go in the Statics collection
+            // In BepuPhysics v2, static bodies go in the Statics collection  
             var staticDescription = new StaticDescription(
                 position,
                 Quaternion.Identity,
@@ -160,10 +181,10 @@ public class PhysicsWorld : IDisposable
             // Create dynamic body description
             var bodyDescription = new BodyDescription
             {
-                Activity = new BodyActivityDescription(0.001f), // Low threshold to keep body active
+                Activity = new BodyActivityDescription(0.01f), // Activity threshold - higher = stays active longer
                 Collidable = new CollidableDescription(shape, 0.1f), // 0.1f is speculative margin
                 Pose = new RigidPose(position, Quaternion.Identity),
-                LocalInertia = inertia
+                LocalInertia = disableGravity ? new BodyInertia { InverseMass = inertia.InverseMass } : inertia
             };
             
             var bodyHandle = _simulation.Bodies.Add(bodyDescription);
@@ -173,6 +194,7 @@ public class PhysicsWorld : IDisposable
             bodyReference.Awake = true; // Explicitly wake the body
             
             entity = new PhysicsEntity(entityId, entityType, bodyHandle, shape);
+            entity.GravityDisabled = disableGravity;
         }
         
         _entityRegistry.Register(entity);
@@ -278,7 +300,28 @@ public class PhysicsWorld : IDisposable
             return; // Can't apply impulse to static bodies
         
         var bodyReference = _simulation.Bodies[entity.BodyHandle];
+        
+        // Wake the body if it's asleep - critical for impulse to work!
+        if (!bodyReference.Awake)
+        {
+            bodyReference.Awake = true;
+        }
+        
         bodyReference.ApplyLinearImpulse(impulse);
+    }
+    
+    /// <summary>
+    /// Applies a linear impulse to an entity by ID.
+    /// Convenience method that looks up the entity first.
+    /// </summary>
+    public bool ApplyLinearImpulse(int entityId, Vector3 impulse)
+    {
+        var entity = _entityRegistry.GetEntityById(entityId);
+        if (entity == null)
+            return false;
+        
+        ApplyLinearImpulse(entity, impulse);
+        return true;
     }
     
     /// <summary>
@@ -340,6 +383,149 @@ public class PhysicsWorld : IDisposable
         var inertia = sphere.ComputeInertia(mass);
         var shapeIndex = _simulation.Shapes.Add(sphere);
         return (shapeIndex, inertia);
+    }
+    
+    /// <summary>
+    /// Creates a mesh shape from triangle data for static collision.
+    /// Uses actual triangle geometry instead of approximating with a bounding box.
+    /// Note: BepuPhysics v2 meshes are one-sided based on triangle winding order.
+    /// </summary>
+    /// <param name="vertices">Array of vertex positions</param>
+    /// <param name="indices">Array of triangle indices (must be multiple of 3)</param>
+    /// <returns>Shape index for the created mesh</returns>
+    public TypedIndex CreateMeshShape(Vector3[] vertices, int[] indices)
+    {
+        if (vertices.Length < 3)
+            throw new ArgumentException("Mesh must have at least 3 vertices", nameof(vertices));
+        
+        if (indices.Length < 3 || indices.Length % 3 != 0)
+            throw new ArgumentException("Mesh indices must be a multiple of 3 (triangles)", nameof(indices));
+        
+        // Allocate triangle buffer from pool
+        int triangleCount = indices.Length / 3;
+        _bufferPool.Take<Triangle>(triangleCount, out var triangles);
+        
+        // Convert vertices and indices to BepuPhysics Triangle structs
+        for (int i = 0; i < triangleCount; i++)
+        {
+            int idx = i * 3;
+            triangles[i] = new Triangle(
+                vertices[indices[idx]],
+                vertices[indices[idx + 1]],
+                vertices[indices[idx + 2]]
+            );
+        }
+        
+        // Create mesh shape
+        // BepuPhysics v2 Mesh uses a tree structure for efficient collision detection
+        var mesh = new Mesh(triangles, Vector3.One, _bufferPool);
+        
+        // Add mesh to simulation's shape collection
+        var shapeIndex = _simulation.Shapes.Add(mesh);
+        
+        Console.WriteLine($"[PhysicsWorld] Created mesh shape with {triangleCount} triangles");
+        
+        return shapeIndex;
+    }
+    
+    /// <summary>
+    /// Stores raw mesh data for an entity.
+    /// This mesh data will be used by NavMeshBuilder to extract geometry for navmesh generation.
+    /// Note: The mesh is converted to a bounding box for physics collision purposes.
+    /// </summary>
+    private class MeshStorage
+    {
+        public Vector3[] Vertices { get; set; } = Array.Empty<Vector3>();
+        public int[] Indices { get; set; } = Array.Empty<int>();
+        public NavMeshAreaType NavMeshArea { get; set; } = NavMeshAreaType.Walkable;
+    }
+    
+    private readonly Dictionary<int, MeshStorage> _meshData = new();
+    
+    /// <summary>
+    /// NavMesh area type for Recast navigation generation.
+    /// </summary>
+    public enum NavMeshAreaType
+    {
+        /// <summary>Walkable surface (ground, floors)</summary>
+        Walkable = 0,
+        /// <summary>Unwalkable/blocking volume (walls, buildings)</summary>
+        Unwalkable = 1,
+        /// <summary>Ignore (not included in navmesh)</summary>
+        Ignore = 2
+    }
+    
+    /// <summary>
+    /// Creates a mesh-based static entity from raw triangle data.
+    /// Uses actual triangle mesh collision geometry for accurate physics.
+    /// The raw triangle data is also preserved for navmesh generation.
+    /// </summary>
+    /// <param name="entityId">Unique entity ID</param>
+    /// <param name="entityType">Type of entity</param>
+    /// <param name="vertices">Mesh vertices</param>
+    /// <param name="indices">Mesh triangle indices</param>
+    /// <param name="position">World position offset</param>
+    /// <param name="navMeshArea">NavMesh area type for this mesh</param>
+    /// <returns>Created physics entity</returns>
+    public PhysicsEntity RegisterMeshEntity(int entityId, EntityType entityType, 
+        Vector3[] vertices, int[] indices, Vector3 position = default, NavMeshAreaType navMeshArea = NavMeshAreaType.Walkable)
+    {
+        if (vertices.Length < 3)
+        {
+            throw new ArgumentException("Mesh must have at least 3 vertices", nameof(vertices));
+        }
+        
+        if (indices.Length < 3 || indices.Length % 3 != 0)
+        {
+            throw new ArgumentException("Mesh indices must be a multiple of 3 (triangles)", nameof(indices));
+        }
+        
+        // Store mesh data for navmesh extraction
+        _meshData[entityId] = new MeshStorage
+        {
+            Vertices = vertices,
+            Indices = indices,
+            NavMeshArea = navMeshArea
+        };
+        
+        // Calculate bounding box for debug logging and validation
+        var min = vertices[0];
+        var max = vertices[0];
+        
+        foreach (var v in vertices)
+        {
+            min = Vector3.Min(min, v);
+            max = Vector3.Max(max, v);
+        }
+        
+        var center = (min + max) * 0.5f;
+        var size = max - min;
+        
+        // Create proper mesh shape for collision (replaces bounding box)
+        var meshShape = CreateMeshShape(vertices, indices);
+        
+        // Debug logging for terrain mesh collision
+        Console.WriteLine($"[PhysicsWorld] Registering mesh entity {entityId} with triangle mesh collision:");
+        Console.WriteLine($"[PhysicsWorld]   Position: ({position.X:F2}, {position.Y:F2}, {position.Z:F2})");
+        Console.WriteLine($"[PhysicsWorld]   Triangles: {indices.Length / 3}");
+        Console.WriteLine($"[PhysicsWorld]   Bounds: ({min.X:F2}, {min.Y:F2}, {min.Z:F2}) to ({max.X:F2}, {max.Y:F2}, {max.Z:F2})");
+        Console.WriteLine($"[PhysicsWorld]   Size: ({size.X:F2}, {size.Y:F2}, {size.Z:F2})");
+        
+        // Register as static entity with mesh collision
+        return RegisterEntity(entityId, entityType, position, meshShape, isStatic: true);
+    }
+    
+    /// <summary>
+    /// Gets the raw mesh data for an entity, if it was created with RegisterMeshEntity.
+    /// Returns null if the entity doesn't have mesh data.
+    /// </summary>
+    public (Vector3[] vertices, int[] indices, NavMeshAreaType navMeshArea)? GetMeshData(int entityId)
+    {
+        if (_meshData.TryGetValue(entityId, out var meshStorage))
+        {
+            return (meshStorage.Vertices, meshStorage.Indices, meshStorage.NavMeshArea);
+        }
+        return null;
     }
     
     /// <summary>

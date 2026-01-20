@@ -16,23 +16,35 @@ namespace Spatial.Pathfinding;
 public class NavMeshGenerator
 {
     /// <summary>
-    /// Generates a navigation mesh from triangle mesh geometry.
+    /// Generates a navigation mesh from triangle mesh geometry with area IDs.
+    /// Uses DotRecast's area-based input for proper walkable/unwalkable classification.
     /// </summary>
-    public NavMeshData GenerateNavMesh(float[] vertices, int[] indices, AgentConfig agentConfig)
+    public NavMeshData GenerateNavMesh(float[] vertices, int[] indices, int[] areas, AgentConfig agentConfig)
     {
-        // Step 1: Create input geometry provider
-        var geomProvider = new RcSimpleInputGeomProvider(vertices, indices);
+        // Step 1: Filter out walkable triangles that are below unwalkable geometry
+        // This prevents navmesh generation in intersection volumes where thin horizontal
+        // surfaces (grounds) overlap with vertical obstacles (walls)
+        var (filteredVertices, filteredIndices, filteredAreas) = 
+            FilterOccludedWalkableAreas(vertices, indices, areas);
         
-        // Step 2: Calculate bounding box
-        var (bmin, bmax) = CalculateBounds(vertices);
+        // Step 2: Create input geometry provider
+        var geomProvider = new SimpleInputGeomProvider(filteredVertices, filteredIndices);
         
-        // Step 3: Create RcAreaModification (walkable area)
+        // Step 3: Calculate bounding box
+        var (bmin, bmax) = CalculateBounds(filteredVertices);
+        
+        // Add padding to bounds for proper voxelization
+        // Recast needs space above and below geometry to work properly
+        bmin.Y -= agentConfig.CellHeight; // Add one cell below
+        bmax.Y += agentConfig.Height * 2; // Add clearance above for agent
+        
+        // Step 4: Create RcAreaModification (walkable area)
         // Recast treats area id 63 (0x3F) as the default walkable area
         var walkableAreaMod = new RcAreaModification(0x3f);
         
-        // Step 4: Create configuration for Recast
+        // Step 5: Create configuration for Recast
         // RcConfig constructor signature (19 parameters)
-        // Try with filters DISABLED to see if they're removing all geometry
+        // Enable filters to exclude problematic areas based on agent clearance
         var config = new RcConfig(
             RcPartition.WATERSHED,                          // partitionType
             agentConfig.CellSize,                           // cellSize
@@ -41,24 +53,24 @@ public class NavMeshGenerator
             agentConfig.Height,                             // agentHeight
             agentConfig.Radius,                             // agentRadius
             agentConfig.MaxClimb,                           // agentMaxClimb
-            8,                                              // regionMinSize
-            20,                                             // regionMergeSize
+            1,                                              // regionMinSize (reduced from 8 for small geometry)
+            4,                                              // regionMergeSize (reduced from 20 for small geometry)
             agentConfig.EdgeMaxLength,                      // edgeMaxLen
             agentConfig.EdgeMaxError,                       // edgeMaxError
             6,                                              // vertsPerPoly
             agentConfig.DetailSampleDistance,               // detailSampleDist
             agentConfig.DetailSampleMaxError,               // detailSampleMaxError
-            false,                                          // filterLowHangingObstacles - DISABLED
-            false,                                          // filterLedgeSpans - DISABLED
-            false,                                          // filterWalkableLowHeightSpans - DISABLED
+            true,                                           // filterLowHangingObstacles - ENABLED to remove obstacles below walkable surfaces
+            true,                                           // filterLedgeSpans - ENABLED to remove dangerous ledges
+            true,                                           // filterWalkableLowHeightSpans - ENABLED to remove areas too low for agent (based on walkableHeight, not absolute Y)
             walkableAreaMod,                                // walkableAreaMod
             true                                            // buildMeshDetail
         );
         
-        // Step 5: Create builder config with bounding box
+        // Step 6: Create builder config with bounding box
         var builderConfig = new RcBuilderConfig(config, bmin, bmax);
         
-        // Step 6: Build the navigation mesh using RcBuilder
+        // Step 7: Build the navigation mesh using RcBuilder
         var builder = new RcBuilder();
         
         Console.WriteLine($"Building navmesh with bounds: min=({bmin.X}, {bmin.Y}, {bmin.Z}), max=({bmax.X}, {bmax.Y}, {bmax.Z})");
@@ -102,6 +114,109 @@ public class NavMeshGenerator
     }
     
     /// <summary>
+    /// Generates a navigation mesh directly from triangle mesh geometry using DotRecast's recommended approach.
+    /// This method bypasses area-based filtering and lets DotRecast handle walkable surface detection.
+    /// 
+    /// RECOMMENDED for:
+    /// - Static world geometry loaded from files (.obj, .fbx, etc.)
+    /// - Artist-authored levels
+    /// - Maximum navmesh quality
+    /// 
+    /// Use the regular GenerateNavMesh() method for:
+    /// - Dynamic procedural world generation  
+    /// - Runtime obstacle modification
+    /// - Geometry extracted from physics systems
+    /// </summary>
+    public NavMeshData GenerateNavMeshDirect(float[] vertices, int[] indices, AgentConfig agentConfig)
+    {
+        // Step 1: Create input geometry provider (no area filtering)
+        var geomProvider = new SimpleInputGeomProvider(vertices, indices);
+        
+        // Step 2: Calculate bounding box
+        var (bmin, bmax) = CalculateBounds(vertices);
+        
+        // Add padding to bounds (DotRecast recommended)
+        bmin.Y -= agentConfig.CellHeight;
+        bmax.Y += agentConfig.Height * 2;
+        
+        // Step 3: Create configuration with DotRecast recommended settings
+        // Cell size: agent radius / 2 for outdoor, radius / 3 for indoor
+        var cellSize = agentConfig.Radius / 2.0f;
+        var cellHeight = cellSize / 2.0f;
+        
+        var walkableAreaMod = new RcAreaModification(0x3f);
+        
+        var config = new RcConfig(
+            RcPartition.WATERSHED,                          // partitionType (recommended for most cases)
+            cellSize,                                        // cellSize (radius / 2)
+            cellHeight,                                      // cellHeight (half of cell size)
+            agentConfig.MaxSlope,                           // agentMaxSlope
+            agentConfig.Height,                             // agentHeight
+            agentConfig.Radius,                             // agentRadius
+            agentConfig.MaxClimb,                           // agentMaxClimb
+            1,                                              // regionMinSize
+            4,                                              // regionMergeSize
+            agentConfig.Radius * 8.0f,                      // edgeMaxLen (recommended: radius * 8)
+            1.3f,                                           // edgeMaxError (recommended: 1.1-1.5)
+            6,                                              // vertsPerPoly
+            cellSize * 6.0f,                                // detailSampleDist (recommended: cellSize * 6)
+            cellHeight,                                     // detailSampleMaxError
+            true,                                           // filterLowHangingObstacles
+            true,                                           // filterLedgeSpans
+            true,                                           // filterWalkableLowHeightSpans
+            walkableAreaMod,                                // walkableAreaMod
+            true                                            // buildMeshDetail
+        );
+        
+        // Step 4: Create builder config with bounding box
+        var builderConfig = new RcBuilderConfig(config, bmin, bmax);
+        
+        // Step 5: Build the navigation mesh using RcBuilder (DotRecast handles all filtering)
+        var builder = new RcBuilder();
+        
+        Console.WriteLine($"[Direct] Building navmesh with DotRecast recommended settings:");
+        Console.WriteLine($"[Direct]   Bounds: min=({bmin.X:F2}, {bmin.Y:F2}, {bmin.Z:F2}), max=({bmax.X:F2}, {bmax.Y:F2}, {bmax.Z:F2})");
+        Console.WriteLine($"[Direct]   Agent: height={agentConfig.Height}, radius={agentConfig.Radius}, maxClimb={agentConfig.MaxClimb}");
+        Console.WriteLine($"[Direct]   Voxel: cellSize={cellSize:F2}, cellHeight={cellHeight:F2}");
+        
+        var buildResult = builder.Build(geomProvider, builderConfig, keepInterResults: true);
+        
+        if (buildResult == null)
+        {
+            throw new InvalidOperationException("Failed to build navigation mesh from geometry.");
+        }
+        
+        Console.WriteLine($"[Direct] Build result: {buildResult.Mesh?.npolys ?? 0} polys, {buildResult.ContourSet?.conts?.Count ?? 0} contours");
+        
+        // Step 6: Create Detour navigation mesh
+        var navMesh = CreateDetourNavMesh(buildResult, config, agentConfig);
+        
+        // Step 7: Create query object for pathfinding
+        var query = new DtNavMeshQuery(navMesh);
+        
+        return new NavMeshData(navMesh, query);
+    }
+    
+    /// <summary>
+    /// Generates a navigation mesh directly from a list of triangles using DotRecast's recommended approach.
+    /// </summary>
+    public NavMeshData GenerateNavMeshDirect(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, AgentConfig agentConfig)
+    {
+        // Convert Vector3 list to float array
+        var verticesArray = new float[vertices.Count * 3];
+        for (int i = 0; i < vertices.Count; i++)
+        {
+            verticesArray[i * 3] = vertices[i].X;
+            verticesArray[i * 3 + 1] = vertices[i].Y;
+            verticesArray[i * 3 + 2] = vertices[i].Z;
+        }
+        
+        var indicesArray = indices.ToArray();
+        
+        return GenerateNavMeshDirect(verticesArray, indicesArray, agentConfig);
+    }
+    
+    /// <summary>
     /// Calculates the bounding box of the geometry.
     /// </summary>
     private (RcVec3f min, RcVec3f max) CalculateBounds(float[] vertices)
@@ -133,6 +248,114 @@ public class NavMeshGenerator
     }
     
     /// <summary>
+    /// Filters out walkable triangles that are occluded by unwalkable geometry above them.
+    /// This prevents navmesh generation in areas where thin horizontal surfaces intersect
+    /// with vertical obstacles (e.g., underground areas where a ground plane passes through a wall).
+    /// 
+    /// Algorithm:
+    /// 1. Separate walkable (area 63) and unwalkable (area 0) triangles
+    /// 2. For each walkable triangle, check if there's an unwalkable triangle above it
+    /// 3. If occluded, mark the walkable triangle as unwalkable (area 0)
+    /// </summary>
+    private (float[] vertices, int[] indices, int[] areas) FilterOccludedWalkableAreas(
+        float[] vertices, int[] indices, int[] areas)
+    {
+        int triangleCount = indices.Length / 3;
+        var filteredAreas = new int[triangleCount];
+        Array.Copy(areas, filteredAreas, triangleCount);
+        
+        int occludedCount = 0;
+        
+        // Process each walkable triangle
+        for (int i = 0; i < triangleCount; i++)
+        {
+            // Skip if not walkable
+            if (areas[i] != 63)
+            {
+                continue;
+            }
+            
+            // Get triangle vertices
+            int idx0 = indices[i * 3];
+            int idx1 = indices[i * 3 + 1];
+            int idx2 = indices[i * 3 + 2];
+            
+            var v0 = new System.Numerics.Vector3(vertices[idx0 * 3], vertices[idx0 * 3 + 1], vertices[idx0 * 3 + 2]);
+            var v1 = new System.Numerics.Vector3(vertices[idx1 * 3], vertices[idx1 * 3 + 1], vertices[idx1 * 3 + 2]);
+            var v2 = new System.Numerics.Vector3(vertices[idx2 * 3], vertices[idx2 * 3 + 1], vertices[idx2 * 3 + 2]);
+            
+            // Calculate triangle center and average height
+            var center = (v0 + v1 + v2) / 3.0f;
+            float walkableHeight = center.Y;
+            
+            // Check if this walkable triangle is occluded by unwalkable geometry above it
+            bool isOccluded = false;
+            
+            for (int j = 0; j < triangleCount; j++)
+            {
+                // Skip if not unwalkable
+                if (areas[j] != 0)
+                {
+                    continue;
+                }
+                
+                // Get unwalkable triangle vertices
+                int uidx0 = indices[j * 3];
+                int uidx1 = indices[j * 3 + 1];
+                int uidx2 = indices[j * 3 + 2];
+                
+                var uv0 = new System.Numerics.Vector3(vertices[uidx0 * 3], vertices[uidx0 * 3 + 1], vertices[uidx0 * 3 + 2]);
+                var uv1 = new System.Numerics.Vector3(vertices[uidx1 * 3], vertices[uidx1 * 3 + 1], vertices[uidx1 * 3 + 2]);
+                var uv2 = new System.Numerics.Vector3(vertices[uidx2 * 3], vertices[uidx2 * 3 + 1], vertices[uidx2 * 3 + 2]);
+                
+                // Check if unwalkable triangle is below the walkable one
+                // (indicating the walkable surface is inside or intersecting the unwalkable volume)
+                float unwalkableMinY = Math.Min(Math.Min(uv0.Y, uv1.Y), uv2.Y);
+                float unwalkableMaxY = Math.Max(Math.Max(uv0.Y, uv1.Y), uv2.Y);
+                
+                // If the walkable surface is within the vertical range of the unwalkable geometry
+                if (walkableHeight >= unwalkableMinY && walkableHeight <= unwalkableMaxY)
+                {
+                    // Check horizontal overlap (simple 2D AABB test in XZ plane)
+                    float walkableMinX = Math.Min(Math.Min(v0.X, v1.X), v2.X);
+                    float walkableMaxX = Math.Max(Math.Max(v0.X, v1.X), v2.X);
+                    float walkableMinZ = Math.Min(Math.Min(v0.Z, v1.Z), v2.Z);
+                    float walkableMaxZ = Math.Max(Math.Max(v0.Z, v1.Z), v2.Z);
+                    
+                    float unwalkableMinX = Math.Min(Math.Min(uv0.X, uv1.X), uv2.X);
+                    float unwalkableMaxX = Math.Max(Math.Max(uv0.X, uv1.X), uv2.X);
+                    float unwalkableMinZ = Math.Min(Math.Min(uv0.Z, uv1.Z), uv2.Z);
+                    float unwalkableMaxZ = Math.Max(Math.Max(uv0.Z, uv1.Z), uv2.Z);
+                    
+                    // Check if AABBs overlap in XZ plane
+                    bool overlapX = walkableMinX <= unwalkableMaxX && walkableMaxX >= unwalkableMinX;
+                    bool overlapZ = walkableMinZ <= unwalkableMaxZ && walkableMaxZ >= unwalkableMinZ;
+                    
+                    if (overlapX && overlapZ)
+                    {
+                        // This walkable triangle is inside or intersecting with unwalkable geometry
+                        isOccluded = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (isOccluded)
+            {
+                filteredAreas[i] = 0; // Mark as unwalkable
+                occludedCount++;
+            }
+        }
+        
+        if (occludedCount > 0)
+        {
+            Console.WriteLine($"Filtered {occludedCount} occluded walkable triangles (marked as unwalkable)");
+        }
+        
+        return (vertices, indices, filteredAreas);
+    }
+    
+    /// <summary>
     /// Creates DtNavMesh from RcBuilder result.
     /// </summary>
     private DtNavMesh CreateDetourNavMesh(RcBuilderResult buildResult, RcConfig config, AgentConfig agentConfig)
@@ -145,19 +368,25 @@ public class NavMeshGenerator
             throw new InvalidOperationException("Build result does not contain polygon mesh.");
         }
         
-        // IMPORTANT: Set walkable flags on all polygons
-        // Without flags, polygons won't be used in pathfinding queries
+        // IMPORTANT: Set walkable flags on polygons based on area IDs
+        // Recast's area-based input ensures only intended areas become walkable
+        // No height-based filtering needed - area IDs handle underground/building interiors
         const int WALKABLE_FLAG = 0x01; // Standard walkable flag
+        
         if (mesh.flags != null && mesh.areas != null)
         {
             for (int i = 0; i < mesh.npolys; i++)
             {
                 // Set walkable flag for all polygons with area 63 (walkable area)
+                // Unwalkable polygons (area 0) remain without flags
                 if (mesh.areas[i] == 63)
                 {
                     mesh.flags[i] = WALKABLE_FLAG;
                 }
             }
+            
+            int walkableCount = mesh.areas.Count(a => a == 63);
+            Console.WriteLine($"Set walkable flags on {walkableCount}/{mesh.npolys} polygons (area 63)");
         }
         
         Console.WriteLine($"Mesh info: verts={mesh.nverts}, polys={mesh.npolys}, nvp={mesh.nvp}");
@@ -261,9 +490,9 @@ public class NavMeshGenerator
     }
     
     /// <summary>
-    /// Generates a navigation mesh from a list of triangles.
+    /// Generates a navigation mesh from a list of triangles with area IDs.
     /// </summary>
-    public NavMeshData GenerateNavMesh(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, AgentConfig agentConfig)
+    public NavMeshData GenerateNavMesh(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, IReadOnlyList<int> areas, AgentConfig agentConfig)
     {
         // Convert Vector3 list to float array
         var verticesArray = new float[vertices.Count * 3];
@@ -276,7 +505,99 @@ public class NavMeshGenerator
         
         // Convert indices list to array
         var indicesArray = indices.ToArray();
+        var areasArray = areas.ToArray();
         
-        return GenerateNavMesh(verticesArray, indicesArray, agentConfig);
+        return GenerateNavMesh(verticesArray, indicesArray, areasArray, agentConfig);
+    }
+    
+    /// <summary>
+    /// Generates a navigation mesh from triangle mesh geometry (backward compatibility).
+    /// All triangles default to walkable (area 63).
+    /// </summary>
+    public NavMeshData GenerateNavMesh(float[] vertices, int[] indices, AgentConfig agentConfig)
+    {
+        // Default all triangles to walkable (area 63)
+        int triangleCount = indices.Length / 3;
+        var areas = new int[triangleCount];
+        Array.Fill(areas, 63); // RC_WALKABLE_AREA
+        
+        return GenerateNavMesh(vertices, indices, areas, agentConfig);
+    }
+    
+    /// <summary>
+    /// Generates a navigation mesh from a list of triangles (backward compatibility).
+    /// All triangles default to walkable (area 63).
+    /// </summary>
+    public NavMeshData GenerateNavMesh(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, AgentConfig agentConfig)
+    {
+        // Default all triangles to walkable (area 63)
+        int triangleCount = indices.Count / 3;
+        var areas = new int[triangleCount];
+        Array.Fill(areas, 63); // RC_WALKABLE_AREA
+        
+        return GenerateNavMesh(vertices, indices, areas, agentConfig);
     }
 }
+
+/// <summary>
+/// Simple implementation of IRcInputGeomProvider for triangle mesh input.
+/// </summary>
+public class SimpleInputGeomProvider : IRcInputGeomProvider
+{
+    private readonly float[] _vertices;
+    private readonly int[] _faces;
+    private readonly RcVec3f _bmin;
+    private readonly RcVec3f _bmax;
+    private readonly List<RcTriMesh> _meshes;
+    private readonly List<RcConvexVolume> _convexVolumes;
+    private readonly List<RcOffMeshConnection> _offMeshConnections;
+
+    public SimpleInputGeomProvider(float[] vertices, int[] faces)
+    {
+        _vertices = vertices;
+        _faces = faces;
+        _convexVolumes = new List<RcConvexVolume>();
+        _offMeshConnections = new List<RcOffMeshConnection>();
+        
+        // Calculate bounds
+        _bmin = new RcVec3f(float.MaxValue, float.MaxValue, float.MaxValue);
+        _bmax = new RcVec3f(float.MinValue, float.MinValue, float.MinValue);
+        
+        for (int i = 0; i < vertices.Length; i += 3)
+        {
+            _bmin.X = Math.Min(_bmin.X, vertices[i]);
+            _bmin.Y = Math.Min(_bmin.Y, vertices[i + 1]);
+            _bmin.Z = Math.Min(_bmin.Z, vertices[i + 2]);
+            
+            _bmax.X = Math.Max(_bmax.X, vertices[i]);
+            _bmax.Y = Math.Max(_bmax.Y, vertices[i + 1]);
+            _bmax.Z = Math.Max(_bmax.Z, vertices[i + 2]);
+        }
+        
+        // Create mesh
+        _meshes = new List<RcTriMesh> { new RcTriMesh(vertices, faces) };
+    }
+
+    public RcVec3f GetMeshBoundsMin() => _bmin;
+    public RcVec3f GetMeshBoundsMax() => _bmax;
+    public RcTriMesh GetMesh() => _meshes[0];
+    public IEnumerable<RcTriMesh> Meshes() => _meshes;
+    public IList<RcConvexVolume> ConvexVolumes() => _convexVolumes;
+    public List<RcOffMeshConnection> GetOffMeshConnections() => _offMeshConnections;
+    
+    public void AddConvexVolume(RcConvexVolume volume)
+    {
+        _convexVolumes.Add(volume);
+    }
+    
+    public void AddOffMeshConnection(RcVec3f start, RcVec3f end, float radius, bool bidir, int area, int flags)
+    {
+        _offMeshConnections.Add(new RcOffMeshConnection(start, end, radius, bidir, area, flags));
+    }
+    
+    public void RemoveOffMeshConnections(Predicate<RcOffMeshConnection> predicate)
+    {
+        _offMeshConnections.RemoveAll(predicate);
+    }
+}
+

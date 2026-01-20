@@ -13,6 +13,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.TestHarness", "Spat
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.Server", "Spatial.Server\Spatial.Server.csproj", "{70593768-E649-4D03-B805-DFB323E4EDCC}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.MeshLoading", "Spatial.MeshLoading\Spatial.MeshLoading.csproj", "{BE1E4158-D987-45CD-960B-9DEAA0DAE060}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.MetadataGenerator", "Spatial.MetadataGenerator\Spatial.MetadataGenerator.csproj", "{7810C7FD-CB7F-4A44-A49A-2A380189BA18}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,5 +46,13 @@ Global
 		{70593768-E649-4D03-B805-DFB323E4EDCC}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{70593768-E649-4D03-B805-DFB323E4EDCC}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{70593768-E649-4D03-B805-DFB323E4EDCC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BE1E4158-D987-45CD-960B-9DEAA0DAE060}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BE1E4158-D987-45CD-960B-9DEAA0DAE060}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BE1E4158-D987-45CD-960B-9DEAA0DAE060}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BE1E4158-D987-45CD-960B-9DEAA0DAE060}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

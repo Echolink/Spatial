@@ -6,21 +6,26 @@ using System.Collections.Generic;
 
 namespace Spatial.Pathfinding;
 
-/// <summary>
-/// Provides pathfinding queries on a navigation mesh.
-/// Uses DotRecast's DtNavMeshQuery to find paths.
-/// </summary>
-public class Pathfinder
-{
-    private readonly NavMeshData _navMeshData;
-    
     /// <summary>
-    /// Creates a new pathfinder using the provided navigation mesh.
+    /// Provides pathfinding queries on a navigation mesh.
+    /// Uses DotRecast's DtNavMeshQuery to find paths.
     /// </summary>
-    public Pathfinder(NavMeshData navMeshData)
+    public class Pathfinder
     {
-        _navMeshData = navMeshData;
-    }
+        private readonly NavMeshData _navMeshData;
+        
+        /// <summary>
+        /// Gets the navigation mesh data (exposed for spawn validation).
+        /// </summary>
+        public NavMeshData NavMeshData => _navMeshData;
+        
+        /// <summary>
+        /// Creates a new pathfinder using the provided navigation mesh.
+        /// </summary>
+        public Pathfinder(NavMeshData navMeshData)
+        {
+            _navMeshData = navMeshData;
+        }
     
     /// <summary>
     /// Finds a path from start to end position.

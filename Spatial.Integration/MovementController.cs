@@ -31,6 +31,7 @@ public class MovementController
     private readonly PathValidator _pathValidator;
     private readonly LocalAvoidance _localAvoidance;
     private readonly PathfindingConfiguration _config;
+    private readonly CharacterController _characterController;
     
     private readonly Dictionary<int, MovementState> _movementStates = new();
     
@@ -60,15 +61,36 @@ public class MovementController
     public event Action<int, Vector3, Vector3>? OnMovementStarted;
     
     /// <summary>
+    /// Gets the character state for an entity (for testing/debugging).
+    /// </summary>
+    public CharacterState GetCharacterState(PhysicsEntity entity)
+    {
+        return _characterController.GetState(entity);
+    }
+    
+    /// <summary>
     /// Creates a new movement controller.
     /// </summary>
-    public MovementController(PhysicsWorld physicsWorld, Pathfinder pathfinder, PathfindingConfiguration? config = null)
+    public MovementController(PhysicsWorld physicsWorld, Pathfinder pathfinder, PathfindingConfiguration? config = null, CharacterControllerConfig? characterConfig = null)
     {
         _physicsWorld = physicsWorld;
         _pathfinder = pathfinder;
         _config = config ?? new PathfindingConfiguration();
         _pathValidator = new PathValidator(physicsWorld);
         _localAvoidance = new LocalAvoidance(physicsWorld, _config.LocalAvoidanceRadius);
+        
+        // Create character controller for physics-pathfinding integration
+        _characterController = new CharacterController(physicsWorld, characterConfig);
+        
+        // Register ground contact callbacks with physics world
+        // Note: This requires PhysicsWorld to be created with these callbacks for best performance
+        // For now, we'll register them here (they may not work if PhysicsWorld was created earlier)
+        physicsWorld.RegisterGroundContactCallbacks(
+            onGroundContact: (dynamicEntity, groundEntity) => 
+                _characterController.NotifyGroundContact(dynamicEntity, groundEntity),
+            onGroundContactRemoved: (dynamicEntity, groundEntity) => 
+                _characterController.NotifyGroundContactRemoved(dynamicEntity, groundEntity)
+        );
     }
     
     /// <summary>
@@ -109,6 +131,7 @@ public class MovementController
             EntityId = request.EntityId,
             TargetPosition = request.TargetPosition,
             MaxSpeed = request.MaxSpeed,
+            AgentHeight = request.AgentHeight,
             Waypoints = pathResult.Waypoints.ToList(),
             CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, currentPosition, 0),
             LastValidationTime = 0f,
@@ -160,6 +183,17 @@ public class MovementController
     {
         var currentPosition = _physicsWorld.GetEntityPosition(entity);
         
+        // Update character controller state (grounded/airborne detection)
+        var previousState = _characterController.GetState(entity);
+        _characterController.UpdateGroundedState(entity, deltaTime);
+        var currentState = _characterController.GetState(entity);
+        
+        // Detect state transitions
+        if (previousState == CharacterState.AIRBORNE && currentState == CharacterState.RECOVERING)
+        {
+            Console.WriteLine($"[MovementController] Entity {entity.EntityId} landed, recovering...");
+        }
+        
         // Check if we've completed the path
         if (state.CurrentWaypointIndex >= state.Waypoints.Count)
         {
@@ -176,6 +210,15 @@ public class MovementController
         }
         
         var targetWaypoint = state.Waypoints[state.CurrentWaypointIndex];
+        
+        // Check if agent has deviated too far from navmesh (fallen through, stuck)
+        float agentHalfHeight = state.AgentHeight * 0.5f;
+        if (_characterController.HasDeviatedFromNavmesh(entity, targetWaypoint.Y, agentHalfHeight))
+        {
+            Console.WriteLine($"[MovementController] Agent {entity.EntityId} deviated from navmesh, replanning");
+            ReplanPath(entity, state, currentPosition);
+            return;
+        }
         
         // Check if we've reached the current waypoint (XZ distance only)
         var xzDistanceToWaypoint = CalculateXZDistance(currentPosition, targetWaypoint);
@@ -205,34 +248,51 @@ public class MovementController
             return;
         }
         
-        // Calculate desired velocity toward waypoint
-        var desiredVelocity = CalculateDesiredVelocity(currentPosition, targetWaypoint, state.MaxSpeed);
-        
-        // Apply local avoidance if enabled
-        if (_config.EnableLocalAvoidance)
+        // State-aware movement: only apply pathfinding when GROUNDED
+        if (_characterController.IsGrounded(entity))
         {
-            var nearbyEntities = _localAvoidance.GetNearbyEntities(
-                currentPosition, 
-                entity.EntityId, 
-                _config.MaxAvoidanceNeighbors
-            );
+            // Calculate desired velocity toward waypoint
+            var desiredVelocity = CalculateDesiredVelocity(currentPosition, targetWaypoint, state.MaxSpeed);
             
-            if (nearbyEntities.Count > 0)
+            // Apply local avoidance if enabled
+            if (_config.EnableLocalAvoidance)
             {
-                desiredVelocity = _localAvoidance.CalculateAvoidanceVelocity(
-                    entity, 
-                    desiredVelocity, 
-                    nearbyEntities
+                var nearbyEntities = _localAvoidance.GetNearbyEntities(
+                    currentPosition, 
+                    entity.EntityId, 
+                    _config.MaxAvoidanceNeighbors
                 );
+                
+                if (nearbyEntities.Count > 0)
+                {
+                    desiredVelocity = _localAvoidance.CalculateAvoidanceVelocity(
+                        entity, 
+                        desiredVelocity, 
+                        nearbyEntities
+                    );
+                }
             }
+            
+            // Apply XZ velocity for pathfinding (preserve Y velocity for gravity!)
+            var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
+            desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
+            _physicsWorld.SetEntityVelocity(entity, desiredVelocity);
+            
+            // Apply grounding force to keep stable on navmesh
+            _characterController.ApplyGroundingForce(entity, desiredVelocity);
         }
-        
-        // Preserve Y velocity (gravity)
-        var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-        desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
-        
-        // Apply velocity
-        _physicsWorld.SetEntityVelocity(entity, desiredVelocity);
+        else if (_characterController.IsRecovering(entity))
+        {
+            // Wait for stability before resuming pathfinding
+            if (_characterController.IsStable(entity))
+            {
+                // Replan path from current position
+                ReplanPath(entity, state, currentPosition);
+                _characterController.SetGrounded(entity);
+            }
+            // else: continue waiting for stability
+        }
+        // else AIRBORNE - do nothing, let physics handle it completely!
     }
     
     /// <summary>
@@ -309,9 +369,8 @@ public class MovementController
     {
         var finalPosition = _physicsWorld.GetEntityPosition(entity);
         
-        // Stop horizontal movement (preserve Y velocity for gravity)
-        var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-        _physicsWorld.SetEntityVelocity(entity, new Vector3(0, currentVelocity.Y, 0));
+        // Stop all movement (navmesh-based movement doesn't need gravity)
+        _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
         
         // Remove from tracking
         _movementStates.Remove(entity.EntityId);
@@ -343,9 +402,13 @@ public class MovementController
     /// </summary>
     private void MoveTowardWaypoint(PhysicsEntity entity, Vector3 waypoint, Vector3 currentPosition, float maxSpeed)
     {
+        // Only apply movement if grounded
+        if (!_characterController.IsGrounded(entity))
+            return;
+        
         var desiredVelocity = CalculateDesiredVelocity(currentPosition, waypoint, maxSpeed);
         
-        // Preserve Y velocity (gravity)
+        // Preserve Y velocity for gravity (don't zero it out!)
         var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
         desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
         
@@ -360,12 +423,57 @@ public class MovementController
         var entity = _physicsWorld.EntityRegistry.GetEntityById(entityId);
         if (entity != null)
         {
-            // Stop horizontal movement
+            // Stop horizontal movement but preserve Y velocity (gravity)
             var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
             _physicsWorld.SetEntityVelocity(entity, new Vector3(0, currentVelocity.Y, 0));
         }
         
         _movementStates.Remove(entityId);
+        _characterController.RemoveEntity(entityId);
+    }
+    
+    /// <summary>
+    /// Makes an entity jump if it's grounded.
+    /// </summary>
+    /// <param name="entityId">Entity to jump</param>
+    /// <param name="jumpForce">Upward impulse force (default: 5.0f)</param>
+    /// <returns>True if jump was successful (entity was grounded)</returns>
+    public bool Jump(int entityId, float jumpForce = 5.0f)
+    {
+        var entity = _physicsWorld.EntityRegistry.GetEntityById(entityId);
+        if (entity == null)
+            return false;
+        
+        if (_characterController.IsGrounded(entity))
+        {
+            var impulse = new Vector3(0, jumpForce, 0);
+            _physicsWorld.ApplyLinearImpulse(entity, impulse);
+            _characterController.SetAirborne(entity); // Immediately transition to AIRBORNE
+            Console.WriteLine($"[MovementController] Entity {entityId} jumped with force {jumpForce}");
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /// <summary>
+    /// Applies knockback to an entity (e.g., from being hit).
+    /// Forces entity into AIRBORNE state and pauses pathfinding.
+    /// </summary>
+    /// <param name="entityId">Entity to knock back</param>
+    /// <param name="direction">Direction of knockback (will be normalized)</param>
+    /// <param name="force">Knockback force magnitude</param>
+    public void Knockback(int entityId, Vector3 direction, float force)
+    {
+        var entity = _physicsWorld.EntityRegistry.GetEntityById(entityId);
+        if (entity == null)
+            return;
+        
+        var normalizedDirection = Vector3.Normalize(direction);
+        var impulse = normalizedDirection * force;
+        _physicsWorld.ApplyLinearImpulse(entity, impulse);
+        _characterController.SetAirborne(entity); // Force transition to AIRBORNE
+        Console.WriteLine($"[MovementController] Entity {entityId} knocked back with force {force} in direction ({direction.X:F2}, {direction.Y:F2}, {direction.Z:F2})");
     }
     
     /// <summary>
@@ -397,18 +505,19 @@ public class MovementController
     }
 }
 
-/// <summary>
-/// Internal state for tracking entity movement.
-/// </summary>
-internal class MovementState
-{
-    public int EntityId { get; set; }
-    public Vector3 TargetPosition { get; set; }
-    public float MaxSpeed { get; set; }
-    public List<Vector3> Waypoints { get; set; } = new();
-    public int CurrentWaypointIndex { get; set; }
-    public float LastValidationTime { get; set; }
-    public DateTime LastReplanTime { get; set; }
-    public DateTime StartTime { get; set; }
-    public float TotalDistance { get; set; }
-}
+    /// <summary>
+    /// Internal state for tracking entity movement.
+    /// </summary>
+    internal class MovementState
+    {
+        public int EntityId { get; set; }
+        public Vector3 TargetPosition { get; set; }
+        public float MaxSpeed { get; set; }
+        public float AgentHeight { get; set; }
+        public List<Vector3> Waypoints { get; set; } = new();
+        public int CurrentWaypointIndex { get; set; }
+        public float LastValidationTime { get; set; }
+        public DateTime LastReplanTime { get; set; }
+        public DateTime StartTime { get; set; }
+        public float TotalDistance { get; set; }
+    }

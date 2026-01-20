@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "defaultEntityType": "StaticObject",
+  "defaultIsStatic": true,
+  "meshes": [
+    {
+      "name": "Cube",
+      "entityType": "StaticObject",
+      "isStatic": true,
+      "navMeshArea": "Unwalkable",
+      "material": {
+        "friction": 0.5,
+        "restitution": 0
+      }
+    },
+    {
+      "name": "Generic",
+      "entityType": "StaticObject",
+      "isStatic": true,
+      "navMeshArea": "Walkable",
+      "material": {
+        "friction": 0.5,
+        "restitution": 0
+      }
+    },
+    {
+      "name": "nav_test.obj",
+      "entityType": "StaticObject",
+      "isStatic": true,
+      "navMeshArea": "Walkable",
+      "material": {
+        "friction": 0.5,
+        "restitution": 0
+      }
+    }
+  ]
+}

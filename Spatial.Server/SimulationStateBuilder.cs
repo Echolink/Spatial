@@ -62,7 +62,7 @@ public static class SimulationStateBuilder
         // Get shape information
         var (shapeType, size) = GetShapeInfo(physicsWorld, entity);
         
-        return new EntityState
+        var entityState = new EntityState
         {
             Id = entity.EntityId,
             Type = entity.EntityType.ToString(),
@@ -73,6 +73,16 @@ public static class SimulationStateBuilder
             IsStatic = entity.IsStatic,
             ShapeType = shapeType
         };
+        
+        // Check if this entity has mesh data
+        var meshData = physicsWorld.GetMeshData(entity.EntityId);
+        if (meshData.HasValue)
+        {
+            entityState.ShapeType = "Mesh";
+            entityState.Mesh = BuildMeshGeometry(meshData.Value.vertices, meshData.Value.indices);
+        }
+        
+        return entityState;
     }
     
     /// <summary>
@@ -104,6 +114,25 @@ public static class SimulationStateBuilder
             default:
                 return ("Unknown", new[] { 1f, 1f, 1f });
         }
+    }
+    
+    /// <summary>
+    /// Build mesh geometry from vertex and index data
+    /// </summary>
+    private static MeshGeometry BuildMeshGeometry(Vector3[] vertices, int[] indices)
+    {
+        var geometry = new MeshGeometry();
+        
+        // Convert Vector3[] to List<float[]>
+        foreach (var vertex in vertices)
+        {
+            geometry.Vertices.Add(new[] { vertex.X, vertex.Y, vertex.Z });
+        }
+        
+        // Copy indices
+        geometry.Indices.AddRange(indices);
+        
+        return geometry;
     }
     
     /// <summary>

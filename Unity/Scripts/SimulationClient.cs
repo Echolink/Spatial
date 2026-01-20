@@ -164,7 +164,18 @@ namespace Spatial.Unity
         public float[] Size;     // [width, height, length] or [radius, height, radius]
         public float[] Velocity; // [x, y, z]
         public bool IsStatic;
-        public string ShapeType; // "Box", "Capsule", "Sphere"
+        public string ShapeType; // "Box", "Capsule", "Sphere", "Mesh"
+        public MeshGeometry Mesh; // Optional mesh data for custom meshes
+    }
+    
+    /// <summary>
+    /// Mesh geometry data for entity visualization
+    /// </summary>
+    [Serializable]
+    public class MeshGeometry
+    {
+        public List<float[]> Vertices = new List<float[]>(); // Each vertex is [x, y, z]
+        public List<int> Indices = new List<int>(); // Triangle indices (groups of 3)
     }
     
     /// <summary>

@@ -1,0 +1,52 @@
+# Custom Rules for Spatial Project
+
+## Git Workflow Commands
+
+### Commit Command
+When the user says "commit" (without "push"), you should:
+1. Run `git status` and `git diff` in parallel to see all changes
+2. Run `git log -5 --oneline` to understand recent commit message style
+3. Analyze all changes (both staged and unstaged) comprehensively
+4. Create a meaningful commit message that:
+   - Follows conventional commits format (feat:, fix:, docs:, refactor:, test:, chore:, etc.)
+   - Is concise (1-2 sentences) but descriptive
+   - Focuses on the "why" and impact, not just the "what"
+   - Accurately reflects ALL changes being committed
+5. Stage relevant files with `git add`
+6. Commit with the generated message
+7. Run `git status` after to verify success
+8. DO NOT push to remote unless explicitly requested
+
+### Commit and Push Command
+When the user says any of: "commit and push", "commit push", "cp", or "push":
+1. Follow all steps from the Commit Command above (steps 1-7)
+2. After successful commit, push to the remote repository with `git push`
+3. Report the results of both commit and push operations
+
+### Quick Save Command
+When the user says "quicksave" or "qs":
+1. Run `git status` and `git diff` quickly
+2. Create a brief but meaningful commit message
+3. Stage all changes, commit, and push in one flow
+4. Use for rapid iteration when detailed analysis isn't needed
+
+## Commit Message Guidelines
+- Use conventional commit prefixes:
+  - `feat:` - New feature or capability
+  - `fix:` - Bug fix
+  - `docs:` - Documentation changes
+  - `refactor:` - Code restructuring without behavior change
+  - `test:` - Adding or updating tests
+  - `chore:` - Maintenance tasks, dependencies, config
+  - `perf:` - Performance improvements
+  - `style:` - Formatting, whitespace (no code change)
+- Be specific about what changed and why it matters
+- Keep the first line under 72 characters when possible
+- Add a blank line and more detail if the change is complex
+
+## Important Notes
+- Always analyze ALL changes before committing, not just recent edits
+- Never commit files with secrets (.env, credentials, etc.)
+- If pre-commit hooks fail, fix issues and create a NEW commit (don't amend)
+- Never force push to main/master without explicit user request
+- Follow the repository's existing commit message style

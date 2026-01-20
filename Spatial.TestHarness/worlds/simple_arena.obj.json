@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "defaultEntityType": "StaticObject",
+  "defaultIsStatic": true,
+  "meshes": [
+    {
+      "name": "ground",
+      "entityType": "StaticObject",
+      "isStatic": true,
+      "material": {
+        "friction": 0.8,
+        "restitution": 0.0
+      }
+    },
+    {
+      "name": "wall_*",
+      "entityType": "StaticObject",
+      "isStatic": true,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1
+      }
+    }
+  ]
+}

@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Spatial.Physics\Spatial.Physics.csproj" />
     <ProjectReference Include="..\Spatial.Pathfinding\Spatial.Pathfinding.csproj" />
+    <ProjectReference Include="..\Spatial.MeshLoading\Spatial.MeshLoading.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

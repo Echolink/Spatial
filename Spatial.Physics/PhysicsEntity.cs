@@ -47,6 +47,11 @@ public class PhysicsEntity
     /// </summary>
     public bool IsStatic { get; }
     
+    /// <summary>
+    /// Whether gravity is disabled for this entity (used for navmesh-controlled agents)
+    /// </summary>
+    public bool GravityDisabled { get; set; }
+    
     public PhysicsEntity(int entityId, EntityType entityType, BodyHandle bodyHandle, TypedIndex shapeIndex)
     {
         EntityId = entityId;

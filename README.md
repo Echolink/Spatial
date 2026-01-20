@@ -34,9 +34,10 @@ All systems are operational and tested end-to-end!
 ### Applications
 - **Spatial.TestHarness** - Integration tests
   - Physics collision tests
-  - NavMesh generation tests  
+  - NavMesh generation tests (Direct DotRecast approach - 2x better quality!)
   - Full pathfinding integration tests
   - Real-time visualization broadcasting
+  - ⭐ **Enhanced Simulation Test** - Production-ready validation suite with detailed metrics
 
 - **Unity/** - 3D Visualization client ✨ NEW!
   - Real-time entity rendering
@@ -190,6 +191,21 @@ Unity Client (3D View)
 - Broadcast state at 60 FPS for smooth visualization
 
 ## 🌟 What's New in This Version
+
+### ⭐ Enhanced Simulation Test Suite
+- **Production-Ready Validation**: Comprehensive test with detailed metrics
+- **Multi-Agent Testing**: Test 1-10 agents simultaneously with diverse scenarios
+- **Direct NavMesh Generation**: 2x better quality than physics-based approach (~823 vs ~416 triangles)
+- **Performance Metrics**: Track generation time, success rates, path efficiency, agent speeds
+- **Flexible Configuration**: Configurable agent count, custom meshes, navmesh export
+
+**Quick Start**:
+```bash
+cd Spatial.TestHarness
+dotnet run -- enhanced              # Run with 5 agents (default)
+dotnet run -- enhanced 10           # Stress test with 10 agents
+dotnet run -- enhanced 1 --export-navmesh  # Debug + export
+```
 
 ### Real-Time 3D Visualization
 - **WebSocket Server**: Broadcasts simulation state to Unity clients

@@ -107,6 +107,28 @@ namespace Spatial.Unity
             GameObject entityObj = new GameObject($"Entity_{state.Id}_{state.Type}");
             entityObj.transform.SetParent(transform);
             
+            // Log entities at or near (0,0,0) to help identify the debug cube issue
+            if (state.Position.Length >= 3)
+            {
+                float distFromOrigin = Mathf.Sqrt(
+                    state.Position[0] * state.Position[0] + 
+                    state.Position[1] * state.Position[1] + 
+                    state.Position[2] * state.Position[2]
+                );
+                
+                if (distFromOrigin < 1.0f)
+                {
+                    Debug.Log($"[EntityVisualizer] Entity near origin detected:");
+                    Debug.Log($"  ID: {state.Id}, Type: {state.Type}, Shape: {state.ShapeType}");
+                    Debug.Log($"  Position: ({state.Position[0]:F2}, {state.Position[1]:F2}, {state.Position[2]:F2})");
+                    Debug.Log($"  IsStatic: {state.IsStatic}");
+                    if (state.Size.Length > 0)
+                    {
+                        Debug.Log($"  Size: ({string.Join(", ", state.Size.Select(s => s.ToString("F2")))})");
+                    }
+                }
+            }
+            
             // Create the appropriate shape
             GameObject visualObj = CreateShapeObject(state);
             visualObj.transform.SetParent(entityObj.transform);
@@ -174,6 +196,11 @@ namespace Spatial.Unity
                     }
                     break;
                 
+                case "Mesh":
+                    shapeObj = CreateMeshObject(state);
+                    shapeObj.name = "MeshShape";
+                    break;
+                
                 default:
                     shapeObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
                     shapeObj.name = "UnknownShape";
@@ -181,9 +208,67 @@ namespace Spatial.Unity
             }
             
             // Remove collider (we're just visualizing, not simulating in Unity)
-            Destroy(shapeObj.GetComponent<Collider>());
+            var collider = shapeObj.GetComponent<Collider>();
+            if (collider != null)
+            {
+                Destroy(collider);
+            }
             
             return shapeObj;
+        }
+        
+        /// <summary>
+        /// Create a GameObject with custom mesh from entity state
+        /// </summary>
+        private GameObject CreateMeshObject(EntityState state)
+        {
+            GameObject meshObj = new GameObject("CustomMesh");
+            
+            if (state.Mesh != null && state.Mesh.Vertices.Count > 0 && state.Mesh.Indices.Count > 0)
+            {
+                // Create Unity mesh
+                Mesh mesh = new Mesh();
+                mesh.name = $"Entity_{state.Id}_Mesh";
+                
+                // Convert vertex data
+                Vector3[] vertices = new Vector3[state.Mesh.Vertices.Count];
+                for (int i = 0; i < state.Mesh.Vertices.Count; i++)
+                {
+                    var v = state.Mesh.Vertices[i];
+                    if (v.Length >= 3)
+                    {
+                        vertices[i] = new Vector3(v[0], v[1], v[2]);
+                    }
+                }
+                
+                // Set mesh data
+                mesh.vertices = vertices;
+                mesh.triangles = state.Mesh.Indices.ToArray();
+                
+                // Recalculate normals and bounds
+                mesh.RecalculateNormals();
+                mesh.RecalculateBounds();
+                
+                // Add mesh filter and renderer
+                var meshFilter = meshObj.AddComponent<MeshFilter>();
+                meshFilter.mesh = mesh;
+                
+                var meshRenderer = meshObj.AddComponent<MeshRenderer>();
+                meshRenderer.material = new Material(Shader.Find("Standard"));
+            }
+            else
+            {
+                Debug.LogWarning($"[EntityVisualizer] Entity {state.Id} is marked as Mesh but has no mesh data!");
+                Debug.LogWarning($"[EntityVisualizer] This entity is at position ({state.Position[0]:F2}, {state.Position[1]:F2}, {state.Position[2]:F2})");
+                Debug.LogWarning($"[EntityVisualizer] Entity Type: {state.Type}, IsStatic: {state.IsStatic}");
+                
+                // Fallback to a small cube
+                var fallback = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                fallback.transform.SetParent(meshObj.transform);
+                fallback.transform.localScale = Vector3.one * 0.5f;
+            }
+            
+            return meshObj;
         }
         
         /// <summary>
@@ -216,9 +301,27 @@ namespace Spatial.Unity
             // Update position
             if (state.Position.Length >= 3)
             {
+                // BepuPhysics Position = capsule center (for physics calculations)
+                // For capsule visualization with feet-pivot preference:
+                // - Physics reports center position (e.g., Y=1.0 for 2m capsule on ground at Y=0)
+                // - Unity capsule pivot is at center by default
+                // - User wants "feet on ground" visual (Y=0 means feet at Y=0)
+                // - Solution: Offset visual position down by half the capsule height
+                
+                float yOffset = 0;
+                if (state.ShapeType == "Capsule" && state.Size.Length >= 2)
+                {
+                    // Size[1] is capsule height in physics world
+                    // Unity capsule scale is multiplied by 0.5f (see CreateShapeObject)
+                    // So actual Unity capsule height = state.Size[1] * 0.5f * 2 (Unity default height)
+                    // But Size[1] already contains the full physics height
+                    float capsuleHeight = state.Size[1];
+                    yOffset = -capsuleHeight * 0.5f;  // Move down by half height so feet touch ground
+                }
+                
                 entityObj.transform.position = new Vector3(
                     state.Position[0],
-                    state.Position[1],
+                    state.Position[1] + yOffset,  // Apply feet-pivot offset for capsules
                     state.Position[2]
                 );
             }
