@@ -182,7 +182,7 @@ public class PhysicsWorld : IDisposable
             var bodyDescription = new BodyDescription
             {
                 Activity = new BodyActivityDescription(0.01f), // Activity threshold - higher = stays active longer
-                Collidable = new CollidableDescription(shape, 0.1f), // 0.1f is speculative margin
+                Collidable = new CollidableDescription(shape, 0.5f), // FIXED: Increased speculative margin from 0.1f to 0.5f for better collision detection
                 Pose = new RigidPose(position, Quaternion.Identity),
                 LocalInertia = disableGravity ? new BodyInertia { InverseMass = inertia.InverseMass } : inertia
             };
@@ -392,8 +392,9 @@ public class PhysicsWorld : IDisposable
     /// </summary>
     /// <param name="vertices">Array of vertex positions</param>
     /// <param name="indices">Array of triangle indices (must be multiple of 3)</param>
+    /// <param name="doubleSided">If true, creates reversed triangles for two-sided collision (for walkable ground)</param>
     /// <returns>Shape index for the created mesh</returns>
-    public TypedIndex CreateMeshShape(Vector3[] vertices, int[] indices)
+    public TypedIndex CreateMeshShape(Vector3[] vertices, int[] indices, bool doubleSided = false)
     {
         if (vertices.Length < 3)
             throw new ArgumentException("Mesh must have at least 3 vertices", nameof(vertices));
@@ -401,19 +402,29 @@ public class PhysicsWorld : IDisposable
         if (indices.Length < 3 || indices.Length % 3 != 0)
             throw new ArgumentException("Mesh indices must be a multiple of 3 (triangles)", nameof(indices));
         
+        // Calculate triangle count (double if two-sided)
+        int originalTriangleCount = indices.Length / 3;
+        int totalTriangleCount = doubleSided ? originalTriangleCount * 2 : originalTriangleCount;
+        
         // Allocate triangle buffer from pool
-        int triangleCount = indices.Length / 3;
-        _bufferPool.Take<Triangle>(triangleCount, out var triangles);
+        _bufferPool.Take<Triangle>(totalTriangleCount, out var triangles);
         
         // Convert vertices and indices to BepuPhysics Triangle structs
-        for (int i = 0; i < triangleCount; i++)
+        for (int i = 0; i < originalTriangleCount; i++)
         {
             int idx = i * 3;
-            triangles[i] = new Triangle(
-                vertices[indices[idx]],
-                vertices[indices[idx + 1]],
-                vertices[indices[idx + 2]]
-            );
+            var v0 = vertices[indices[idx]];
+            var v1 = vertices[indices[idx + 1]];
+            var v2 = vertices[indices[idx + 2]];
+            
+            // Original triangle
+            triangles[i] = new Triangle(v0, v1, v2);
+            
+            // Add reversed triangle for double-sided collision (flip winding order)
+            if (doubleSided)
+            {
+                triangles[originalTriangleCount + i] = new Triangle(v0, v2, v1);
+            }
         }
         
         // Create mesh shape
@@ -423,7 +434,8 @@ public class PhysicsWorld : IDisposable
         // Add mesh to simulation's shape collection
         var shapeIndex = _simulation.Shapes.Add(mesh);
         
-        Console.WriteLine($"[PhysicsWorld] Created mesh shape with {triangleCount} triangles");
+        string sideInfo = doubleSided ? " (double-sided)" : " (single-sided)";
+        Console.WriteLine($"[PhysicsWorld] Created mesh shape with {totalTriangleCount} triangles{sideInfo}");
         
         return shapeIndex;
     }
@@ -501,13 +513,18 @@ public class PhysicsWorld : IDisposable
         var center = (min + max) * 0.5f;
         var size = max - min;
         
-        // Create proper mesh shape for collision (replaces bounding box)
-        var meshShape = CreateMeshShape(vertices, indices);
+        // FIXED: Create double-sided mesh for walkable surfaces (ground)
+        // This ensures collision detection works from both above and below
+        // Walkable surfaces need collision from the top (players walking on it)
+        // Double-sided prevents issues when mesh normals point the wrong direction
+        bool isWalkableGround = (navMeshArea == NavMeshAreaType.Walkable);
+        var meshShape = CreateMeshShape(vertices, indices, doubleSided: isWalkableGround);
         
         // Debug logging for terrain mesh collision
         Console.WriteLine($"[PhysicsWorld] Registering mesh entity {entityId} with triangle mesh collision:");
         Console.WriteLine($"[PhysicsWorld]   Position: ({position.X:F2}, {position.Y:F2}, {position.Z:F2})");
         Console.WriteLine($"[PhysicsWorld]   Triangles: {indices.Length / 3}");
+        Console.WriteLine($"[PhysicsWorld]   NavMesh Area: {navMeshArea}");
         Console.WriteLine($"[PhysicsWorld]   Bounds: ({min.X:F2}, {min.Y:F2}, {min.Z:F2}) to ({max.X:F2}, {max.Y:F2}, {max.Z:F2})");
         Console.WriteLine($"[PhysicsWorld]   Size: ({size.X:F2}, {size.Y:F2}, {size.Z:F2})");
         

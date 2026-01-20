@@ -62,14 +62,9 @@ public struct CollisionHandler : INarrowPhaseCallbacks
     /// </summary>
     public bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
     {
-        // Debug: Log static-dynamic collisions only
-        bool hasStatic = (a.Mobility == CollidableMobility.Static) || (b.Mobility == CollidableMobility.Static);
-        bool hasDynamic = (a.Mobility == CollidableMobility.Dynamic) || (b.Mobility == CollidableMobility.Dynamic);
-        
-        if (hasStatic && hasDynamic)
-        {
-            Console.WriteLine($"[Collision] Static-Dynamic contact detected!");
-        }
+        // FIXED: Increase speculative margin for better collision detection with meshes
+        // This helps prevent tunneling through thin geometry
+        speculativeMargin = Math.Max(speculativeMargin, 0.5f);
         
         // Allow all contacts (no filtering for now)
         return true;

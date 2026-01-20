@@ -257,6 +257,9 @@ public static class TestEnhancedShowcase
                     scenario.Start.Z
                 );
 
+                // FIXED: Disable gravity for navmesh agents to prevent falling through ground
+                // CharacterController will enable gravity dynamically when needed (knockback, falling)
+                // This ensures kinematic pathfinding movement works reliably
                 var agent = physicsWorld.RegisterEntityWithInertia(
                     entityId: scenario.EntityId,
                     entityType: EntityType.Player,
@@ -264,7 +267,7 @@ public static class TestEnhancedShowcase
                     shape: agentShape,
                     inertia: agentInertia,
                     isStatic: false,
-                    disableGravity: false  // Enable gravity - CharacterController handles grounding
+                    disableGravity: true  // Disable gravity - agents follow navmesh paths kinematically
                 );
 
                 // Create metric for this agent
