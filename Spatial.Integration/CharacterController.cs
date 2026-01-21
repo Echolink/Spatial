@@ -176,11 +176,19 @@ public class CharacterController
             _physicsWorld.ApplyLinearImpulse(entity, downwardImpulse);
         }
         
-        // Cancel any significant upward velocity to prevent bouncing/floating
-        if (velocity.Y > 0.5f)
+        // CRITICAL: Cancel ANY upward velocity when grounded to prevent collision displacement
+        // This prevents agents from being launched upward during agent-agent collisions
+        if (velocity.Y > 0.01f) // Any upward motion > 1cm/s
         {
-            var dampedVelocity = new Vector3(velocity.X, velocity.Y * 0.3f, velocity.Z);
-            _physicsWorld.SetEntityVelocity(entity, dampedVelocity);
+            var clampedVelocity = new Vector3(velocity.X, 0, velocity.Z);
+            _physicsWorld.SetEntityVelocity(entity, clampedVelocity);
+        }
+        
+        // Also clamp excessive downward velocity
+        else if (velocity.Y < -0.5f)
+        {
+            var clampedVelocity = new Vector3(velocity.X, -0.5f, velocity.Z);
+            _physicsWorld.SetEntityVelocity(entity, clampedVelocity);
         }
     }
     

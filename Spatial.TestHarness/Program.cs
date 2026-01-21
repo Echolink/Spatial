@@ -389,6 +389,18 @@ class Program
                 
                 TestAgentCollision.Run(vizServer);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "local-avoidance")
+            {
+                // Run local avoidance test with agents crossing paths
+                Console.WriteLine("[Info] Running LOCAL AVOIDANCE TEST\n");
+                Console.WriteLine("[Info] This validates:\n");
+                Console.WriteLine("[Info]   - Agents crossing paths successfully");
+                Console.WriteLine("[Info]   - Local avoidance steering around obstacles");
+                Console.WriteLine("[Info]   - Agents reaching opposite destinations");
+                Console.WriteLine("[Info]   - Ground stability (no sinking)\n");
+                
+                TestLocalAvoidance.Run(vizServer);
+            }
             else
             {
                 // Run all tests with visualization
@@ -400,6 +412,7 @@ class Program
                 Console.WriteLine("[Info]   Use 'dotnet run -- collision' to test mesh collision system");
                 Console.WriteLine("[Info]   Use 'dotnet run -- physics-pathfinding' to test physics-pathfinding integration");
                 Console.WriteLine("[Info]   Use 'dotnet run -- agent-collision' to test agent blocking and push mechanics");
+                Console.WriteLine("[Info]   Use 'dotnet run -- local-avoidance' to test local avoidance with crossing agents");
                 Console.WriteLine("[Info]   Use '--export-navmesh [path]' to export generated NavMesh to OBJ file\n");
                 TestPhysicsCollision(vizServer);
                 Console.WriteLine("\n" + new string('=', 60) + "\n");

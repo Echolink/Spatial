@@ -245,6 +245,79 @@ public class MovementController
             return;
         }
         
+        // COLLISION PREDICTION: Check if we're about to collide with another agent
+        if (_config.EnableLocalAvoidance && _characterController.IsGrounded(entity))
+        {
+            var nearbyEntities = _localAvoidance.GetNearbyEntities(
+                currentPosition,
+                entity.EntityId,
+                _config.MaxAvoidanceNeighbors
+            );
+            
+            if (nearbyEntities.Count > 0)
+            {
+                var currentVel = _physicsWorld.GetEntityVelocity(entity);
+                var predictions = _localAvoidance.PredictCollisions(
+                    currentPosition,
+                    currentVel,
+                    targetWaypoint,
+                    nearbyEntities
+                );
+                
+                // Check if any prediction requires avoiding
+                var criticalCollision = predictions.FirstOrDefault(p => p.ShouldReplan);
+                if (criticalCollision != null)
+                {
+                    // PRIORITY SYSTEM: Lower entity ID takes detour, higher entity ID goes straight
+                    // This prevents both agents from taking detours or both going straight
+                    bool shouldTakeDetour = entity.EntityId < criticalCollision.OtherEntity.EntityId;
+                    
+                    if (shouldTakeDetour && !state.HasDetourWaypoint)
+                    {
+                        // This agent takes a DETOUR - add an offset waypoint to go around
+                        var otherPos = _physicsWorld.GetEntityPosition(criticalCollision.OtherEntity);
+                        var directionToOther = Vector3.Normalize(otherPos - currentPosition);
+                        
+                        // Calculate perpendicular offset (go around to the right)
+                        var offsetDirection = new Vector3(directionToOther.Z, 0, -directionToOther.X);
+                        var detourPoint = otherPos + offsetDirection * 3.0f; // 3 meters to the side
+                        
+                        // CRITICAL FIX: Use navmesh Y coordinate for detour, not agent's current Y
+                        // This prevents agents from trying to reach elevated waypoints
+                        detourPoint = new Vector3(detourPoint.X, targetWaypoint.Y, detourPoint.Z);
+                        
+                        Console.WriteLine($"[MovementController] Agent {entity.EntityId} taking DETOUR around Agent {criticalCollision.OtherEntity.EntityId}");
+                        Console.WriteLine($"[MovementController] Detour point: ({detourPoint.X:F2}, {detourPoint.Y:F2}, {detourPoint.Z:F2})");
+                        
+                        // Insert detour waypoint before final destination
+                        var finalDestination = state.Waypoints[^1];
+                        state.Waypoints.Clear();
+                        state.Waypoints.Add(detourPoint);
+                        state.Waypoints.Add(finalDestination);
+                        state.CurrentWaypointIndex = 0;
+                        state.HasDetourWaypoint = true;
+                        state.IsAvoidingCollision = false;
+                        
+                        return; // Recompute movement next frame with new waypoint
+                    }
+                    else if (!shouldTakeDetour)
+                    {
+                        // This agent has priority - continue but slow down slightly
+                        state.IsAvoidingCollision = true;
+                    }
+                }
+                else
+                {
+                    state.IsAvoidingCollision = false;
+                    // If we passed the detour point, remove the flag
+                    if (state.HasDetourWaypoint && state.CurrentWaypointIndex > 0)
+                    {
+                        state.HasDetourWaypoint = false;
+                    }
+                }
+            }
+        }
+        
         // Check if we've reached the current waypoint (XZ distance only)
         var xzDistanceToWaypoint = CalculateXZDistance(currentPosition, targetWaypoint);
         
@@ -277,9 +350,12 @@ public class MovementController
         if (_characterController.IsGrounded(entity))
         {
             // Calculate desired velocity toward waypoint
-            var desiredVelocity = CalculateDesiredVelocity(currentPosition, targetWaypoint, state.MaxSpeed);
+            // If avoiding collision, reduce speed to 75% to allow smoother passing
+            float effectiveSpeed = state.IsAvoidingCollision ? state.MaxSpeed * 0.75f : state.MaxSpeed;
+            var desiredVelocity = CalculateDesiredVelocity(currentPosition, targetWaypoint, effectiveSpeed);
             
-            // Apply local avoidance if enabled
+            // Apply local avoidance if enabled (but only for minor adjustments, not head-on collisions)
+            // Head-on collisions are handled by collision prediction + replanning above
             if (_config.EnableLocalAvoidance)
             {
                 var nearbyEntities = _localAvoidance.GetNearbyEntities(
@@ -288,38 +364,84 @@ public class MovementController
                     _config.MaxAvoidanceNeighbors
                 );
                 
+                // Only apply steering if there are no critical collisions predicted
                 if (nearbyEntities.Count > 0)
                 {
-                    desiredVelocity = _localAvoidance.CalculateAvoidanceVelocity(
-                        entity, 
-                        desiredVelocity, 
+                    var currentVel = _physicsWorld.GetEntityVelocity(entity);
+                    var predictions = _localAvoidance.PredictCollisions(
+                        currentPosition,
+                        currentVel,
+                        targetWaypoint,
                         nearbyEntities
                     );
+                    
+                    bool hasCriticalCollision = predictions.Any(p => p.ShouldReplan);
+                    
+                    // Only use steering for non-critical situations
+                    if (!hasCriticalCollision)
+                    {
+                        desiredVelocity = _localAvoidance.CalculateAvoidanceVelocity(
+                            entity, 
+                            desiredVelocity, 
+                            nearbyEntities
+                        );
+                    }
                 }
             }
             
             // Calculate target Y position for this waypoint
             float targetY = targetWaypoint.Y + agentHalfHeight;
             
-            // FIXED: Directly set Y position when grounded to prevent sinking
-            // The physics collision system was allowing penetration, so we use kinematic positioning for Y
+            // CRITICAL FIX: Prevent both sinking AND unwanted vertical displacement
+            // When agents collide, collision forces can push them upward (observed: Y jumped to 3.19)
+            // We need to aggressively clamp vertical position and velocity
             var currentPos = _physicsWorld.GetEntityPosition(entity);
-            float yError = Math.Abs(currentPos.Y - targetY);
+            float yError = currentPos.Y - targetY;
             
-            if (yError > 0.01f) // More than 1cm off from expected height
+            // Check if agent is near other agents (collision might be causing displacement)
+            bool nearOtherAgents = false;
+            if (_config.EnableLocalAvoidance)
             {
-                // Directly set Y position (kinematic override)
-                _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, targetY, currentPos.Z));
+                var nearbyEntities = _localAvoidance.GetNearbyEntities(
+                    currentPos, 
+                    entity.EntityId, 
+                    _config.MaxAvoidanceNeighbors
+                );
+                nearOtherAgents = nearbyEntities.Count > 0;
+            }
+            
+            // STRICT Y CONSTRAINT: When grounded, agents should NEVER deviate significantly from targetY
+            // Maximum allowed deviation: 10cm (prevents the Y=3.19 jumping issue)
+            float maxYDeviation = 0.10f; // 10cm maximum
+            
+            // Use even stricter thresholds when near other agents to prevent collision displacement
+            float yTolerance = nearOtherAgents ? 0.005f : 0.01f; // 0.5cm when near others, 1cm normally
+            
+            if (Math.Abs(yError) > yTolerance)
+            {
+                // Clamp Y position to prevent excessive displacement
+                float clampedY = targetY + Math.Clamp(yError, -maxYDeviation, maxYDeviation);
                 
-                // Zero out Y velocity when correcting position
+                // Directly set Y position (kinematic override) - this prevents displacement completely
+                _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, clampedY, currentPos.Z));
+                
+                // CRITICAL: Zero out ALL vertical velocity when correcting position
+                // This prevents collision forces from accumulating upward velocity
                 var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
                 desiredVelocity = new Vector3(desiredVelocity.X, 0, desiredVelocity.Z);
+                _physicsWorld.SetEntityVelocity(entity, new Vector3(currentVelocity.X, 0, currentVelocity.Z));
             }
             else
             {
-                // Position is correct, preserve Y velocity for small variations
+                // Position is within tolerance
                 var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-                desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
+                
+                // CRITICAL: Aggressively clamp vertical velocity to prevent displacement
+                // When near other agents, allow ZERO vertical velocity (prevents collision push)
+                // Otherwise, allow minimal downward velocity for ground settling
+                float maxVerticalVelocity = nearOtherAgents ? 0.0f : 0.1f;
+                float clampedY = Math.Clamp(currentVelocity.Y, -0.5f, maxVerticalVelocity);
+                desiredVelocity = new Vector3(desiredVelocity.X, clampedY, desiredVelocity.Z);
             }
             
             _physicsWorld.SetEntityVelocity(entity, desiredVelocity);
@@ -329,9 +451,41 @@ public class MovementController
         }
         else if (_characterController.IsRecovering(entity))
         {
+            // CRITICAL FIX: Gently correct Y position while recovering
+            // Apply upward impulse if agent is too low, don't teleport to avoid oscillation
+            var currentPos = _physicsWorld.GetEntityPosition(entity);
+            var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
+            
+            // Use current waypoint Y if available, otherwise use target position Y
+            float waypointY = state.CurrentWaypointIndex < state.Waypoints.Count 
+                ? state.Waypoints[state.CurrentWaypointIndex].Y 
+                : state.TargetPosition.Y;
+            
+            float targetY = waypointY + agentHalfHeight;
+            float yError = currentPos.Y - targetY;
+            
+            // Only apply correction if agent has settled (low vertical velocity)
+            if (Math.Abs(currentVelocity.Y) < 0.1f && yError < -0.1f) // Sunk more than 10cm
+            {
+                // Apply gentle upward correction force, don't teleport
+                float correctionForce = Math.Abs(yError) * 20.0f; // Proportional force
+                _physicsWorld.ApplyLinearImpulse(entity, new Vector3(0, correctionForce * 0.016f, 0));
+            }
+            
             // Wait for stability before resuming pathfinding
             if (_characterController.IsStable(entity))
             {
+                // Final position check and correction before resuming
+                currentPos = _physicsWorld.GetEntityPosition(entity);
+                yError = currentPos.Y - targetY;
+                
+                if (Math.Abs(yError) > 0.2f) // Still significantly off after recovery
+                {
+                    // Direct teleport as last resort
+                    _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, targetY, currentPos.Z));
+                    _physicsWorld.SetEntityVelocity(entity, new Vector3(currentVelocity.X, 0, currentVelocity.Z));
+                }
+                
                 // Replan path from current position
                 ReplanPath(entity, state, currentPosition);
                 _characterController.SetGrounded(entity);
@@ -603,4 +757,6 @@ public class MovementController
         public DateTime StartTime { get; set; }
         public float TotalDistance { get; set; }
         public bool IsCompleted { get; set; } = false;
+        public bool IsAvoidingCollision { get; set; } = false;
+        public bool HasDetourWaypoint { get; set; } = false;
     }

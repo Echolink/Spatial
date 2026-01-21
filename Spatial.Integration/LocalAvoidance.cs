@@ -28,6 +28,7 @@ public class LocalAvoidance
     
     /// <summary>
     /// Calculates an avoidance velocity adjustment to steer around nearby entities.
+    /// Enhanced to handle head-on collisions by steering perpendicular to collision path.
     /// </summary>
     /// <param name="entity">The entity to calculate avoidance for</param>
     /// <param name="desiredVelocity">The desired velocity toward the target</param>
@@ -42,10 +43,22 @@ public class LocalAvoidance
             return desiredVelocity;
         
         var currentPos = _physicsWorld.GetEntityPosition(entity);
-        var separationForce = CalculateSeparationForce(currentPos, nearbyEntities);
+        var currentVel = _physicsWorld.GetEntityVelocity(entity);
         
-        // Blend desired velocity with separation force
-        var adjustedVelocity = desiredVelocity + separationForce * _avoidanceStrength;
+        // Calculate multiple avoidance forces
+        var separationForce = CalculateSeparationForce(currentPos, nearbyEntities);
+        var collisionAvoidanceForce = CalculateCollisionAvoidance(
+            currentPos, 
+            currentVel, 
+            desiredVelocity, 
+            nearbyEntities
+        );
+        
+        // Combine forces (collision avoidance is stronger for imminent collisions)
+        var totalAvoidance = separationForce * _avoidanceStrength + collisionAvoidanceForce * (_avoidanceStrength * 1.5f);
+        
+        // Blend desired velocity with avoidance forces
+        var adjustedVelocity = desiredVelocity + totalAvoidance;
         
         // Maintain original speed magnitude
         var desiredSpeed = desiredVelocity.Length();
@@ -99,6 +112,96 @@ public class LocalAvoidance
     }
     
     /// <summary>
+    /// Predicts if the current path will collide with another entity's path.
+    /// Returns collision information if a collision is predicted.
+    /// </summary>
+    public CollisionPrediction? PredictPathCollision(
+        Vector3 currentPos,
+        Vector3 currentVel,
+        Vector3 nextWaypoint,
+        PhysicsEntity otherEntity)
+    {
+        var otherPos = _physicsWorld.GetEntityPosition(otherEntity);
+        var otherVel = _physicsWorld.GetEntityVelocity(otherEntity);
+        
+        // Calculate our movement direction
+        var ourDirection = nextWaypoint - currentPos;
+        var ourDistance = ourDirection.Length();
+        
+        if (ourDistance < 0.01f)
+            return null; // No movement
+        
+        ourDirection = Vector3.Normalize(ourDirection);
+        
+        // Check if we're moving toward each other (head-on)
+        var toOther = otherPos - currentPos;
+        var distance = toOther.Length();
+        
+        if (distance < 0.01f || distance > _avoidanceRadius)
+            return null; // Too close or too far
+        
+        var toOtherNormalized = Vector3.Normalize(toOther);
+        
+        // Check if other agent is in our path
+        var dotProduct = Vector3.Dot(ourDirection, toOtherNormalized);
+        if (dotProduct < 0.5f)
+            return null; // Not in our path
+        
+        // Check relative velocity - are we on collision course?
+        var relativeVelocity = currentVel - otherVel;
+        var relativeSpeed = relativeVelocity.Length();
+        
+        if (relativeSpeed < 0.1f)
+            return null; // Not moving relative to each other
+        
+        // Predict time to collision
+        var timeToCollision = distance / (relativeSpeed + 0.1f);
+        
+        // Check if other agent is also moving toward us (mutual collision)
+        var otherToUs = -toOther;
+        var otherDirection = Vector3.Normalize(otherVel);
+        var otherDotProduct = Vector3.Dot(otherDirection, Vector3.Normalize(otherToUs));
+        
+        bool isHeadOn = otherDotProduct > 0.5f; // Other agent is also moving toward us
+        
+        // Only predict collision if imminent (less than 2 seconds)
+        if (timeToCollision > 2.0f)
+            return null;
+        
+        return new CollisionPrediction
+        {
+            OtherEntity = otherEntity,
+            TimeToCollision = timeToCollision,
+            CollisionDistance = distance,
+            IsHeadOn = isHeadOn,
+            ShouldReplan = isHeadOn && timeToCollision < 1.5f // Replan for imminent head-on collisions
+        };
+    }
+    
+    /// <summary>
+    /// Gets all predicted collisions with nearby entities.
+    /// </summary>
+    public List<CollisionPrediction> PredictCollisions(
+        Vector3 currentPos,
+        Vector3 currentVel,
+        Vector3 nextWaypoint,
+        List<PhysicsEntity> nearbyEntities)
+    {
+        var predictions = new List<CollisionPrediction>();
+        
+        foreach (var entity in nearbyEntities)
+        {
+            var prediction = PredictPathCollision(currentPos, currentVel, nextWaypoint, entity);
+            if (prediction != null)
+            {
+                predictions.Add(prediction);
+            }
+        }
+        
+        return predictions.OrderBy(p => p.TimeToCollision).ToList();
+    }
+    
+    /// <summary>
     /// Gets nearby entities within the avoidance radius.
     /// </summary>
     public List<PhysicsEntity> GetNearbyEntities(Vector3 position, int excludeEntityId, int maxNeighbors = 5)
@@ -140,5 +243,74 @@ public class LocalAvoidance
         }
         
         return separationForce;
+    }
+    
+    /// <summary>
+    /// Calculates collision avoidance force to steer perpendicular to collision path.
+    /// This handles head-on collisions by moving sideways instead of trying to push through.
+    /// </summary>
+    private Vector3 CalculateCollisionAvoidance(
+        Vector3 currentPos,
+        Vector3 currentVel,
+        Vector3 desiredVelocity,
+        List<PhysicsEntity> nearbyEntities)
+    {
+        var avoidanceForce = Vector3.Zero;
+        
+        // Only apply collision avoidance if we're moving
+        if (desiredVelocity.Length() < 0.1f)
+            return avoidanceForce;
+        
+        var moveDirection = Vector3.Normalize(desiredVelocity);
+        
+        foreach (var other in nearbyEntities)
+        {
+            var otherPos = _physicsWorld.GetEntityPosition(other);
+            var otherVel = _physicsWorld.GetEntityVelocity(other);
+            
+            var toOther = otherPos - currentPos;
+            var distance = toOther.Length();
+            
+            if (distance < 0.01f || distance > _avoidanceRadius)
+                continue;
+            
+            var toOtherNormalized = Vector3.Normalize(toOther);
+            
+            // Check if other agent is in our path (dot product > 0.5 means within ~60 degrees)
+            var dotProduct = Vector3.Dot(moveDirection, toOtherNormalized);
+            if (dotProduct < 0.3f)
+                continue; // Not in our path
+            
+            // Check relative velocity - are we on collision course?
+            var relativeVelocity = currentVel - otherVel;
+            var relativeSpeed = relativeVelocity.Length();
+            
+            // Predict time to collision
+            var timeToCollision = distance / (relativeSpeed + 0.1f);
+            
+            // Only avoid imminent collisions (less than 2 seconds away)
+            if (timeToCollision > 2.0f)
+                continue;
+            
+            // Calculate perpendicular steering direction
+            // Use the right-hand perpendicular in XZ plane
+            var perpendicularDir = new Vector3(moveDirection.Z, 0, -moveDirection.X);
+            
+            // Choose which side to steer based on relative position
+            // If other agent is on the right, steer left (and vice versa)
+            var rightDot = Vector3.Dot(perpendicularDir, toOtherNormalized);
+            if (rightDot < 0)
+            {
+                perpendicularDir = -perpendicularDir; // Flip to steer the other way
+            }
+            
+            // Strength based on proximity and time to collision
+            var urgency = (1.0f - (distance / _avoidanceRadius)) * (1.0f / (timeToCollision + 0.1f));
+            var clampedUrgency = Math.Min(urgency, 5.0f); // Cap maximum urgency
+            
+            avoidanceForce += perpendicularDir * clampedUrgency;
+        }
+        
+        return avoidanceForce;
     }
 }

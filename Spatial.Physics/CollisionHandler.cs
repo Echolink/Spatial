@@ -62,26 +62,33 @@ public struct CollisionHandler : INarrowPhaseCallbacks
     /// </summary>
     public bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
     {
-        // FIXED: Use larger speculative margin for ground collisions to prevent penetration
+        // ENHANCED: Use larger speculative margin for ground collisions to prevent penetration
         // Speculative contacts are created when objects are within this distance
         // This allows the physics engine to predict and prevent penetration BEFORE it happens
         // For agent-agent: use smaller margin (0.05) to let them get close
-        // For agent-ground: use larger margin (0.2) to prevent sinking
+        // For agent-ground: use even larger margin (0.3) to prevent sinking during collisions
         
         PhysicsEntity? entityA = ResolveEntity(a);
         PhysicsEntity? entityB = ResolveEntity(b);
         
         bool isAgentAgentCollision = IsAgent(entityA) && IsAgent(entityB);
+        bool isGroundCollision = (IsAgent(entityA) && entityB?.IsStatic == true) || 
+                                 (IsAgent(entityB) && entityA?.IsStatic == true);
         
         if (isAgentAgentCollision)
         {
             // Agent-agent: smaller margin for close blocking
             speculativeMargin = Math.Max(speculativeMargin, 0.05f);
         }
+        else if (isGroundCollision)
+        {
+            // Agent-ground: LARGER margin to prevent sinking (especially during agent collisions)
+            speculativeMargin = Math.Max(speculativeMargin, 0.3f);
+        }
         else
         {
-            // Agent-ground or other: larger margin to prevent penetration
-            speculativeMargin = Math.Max(speculativeMargin, 0.2f);
+            // Other collisions: standard margin
+            speculativeMargin = Math.Max(speculativeMargin, 0.15f);
         }
         
         // Allow all contacts (no filtering for now)
@@ -115,6 +122,10 @@ public struct CollisionHandler : INarrowPhaseCallbacks
         bool isPushable = (entityA?.IsPushable ?? false) || (entityB?.IsPushable ?? false);
         
         // Configure material properties based on collision type
+        // Check if this is ground collision specifically
+        bool isGroundCollision = (IsAgent(entityA) && entityB?.IsStatic == true) || 
+                                 (IsAgent(entityB) && entityA?.IsStatic == true);
+        
         // Agent-agent collisions block unless one is explicitly pushable
         if (isAgentAgentCollision && !isPushable)
         {
@@ -122,23 +133,37 @@ public struct CollisionHandler : INarrowPhaseCallbacks
             // High spring frequency = stiff contact (like hitting a wall)
             // Zero maximum recovery = no bouncing or pushing forces
             // Very low friction = can slide past each other easily (for avoidance)
+            // 
+            // CRITICAL: Vertical displacement prevention is handled by:
+            // 1. MovementController: Aggressive Y position and velocity clamping
+            // 2. CharacterController: Zero upward velocity when grounded
+            // 3. This reduces spring stiffness slightly to minimize force spikes
             pairMaterialProperties = new PairMaterialProperties
             {
                 FrictionCoefficient = 0.0f, // Zero friction for easy sliding (agents should slide past each other)
                 MaximumRecoveryVelocity = 0f, // No recovery forces = no pushing!
-                SpringSettings = new SpringSettings(240f, 1f) // Extra stiff (240 Hz), critically damped - prevents any pushing
+                SpringSettings = new SpringSettings(180f, 1f) // Stiff (180 Hz), critically damped - balanced for blocking without force spikes
+            };
+        }
+        else if (isGroundCollision)
+        {
+            // GROUND COLLISION: Extra stiff to prevent any sinking
+            // This is critical to prevent agents from sinking when they collide with each other above ground
+            pairMaterialProperties = new PairMaterialProperties
+            {
+                FrictionCoefficient = 0.1f, // Low friction for smooth movement
+                MaximumRecoveryVelocity = float.MaxValue, // Unlimited recovery to push out of ground
+                SpringSettings = new SpringSettings(180f, 1f) // VERY STIFF: 180 Hz (extra strength), critically damped
             };
         }
         else
         {
-            // NORMAL COLLISION (agent-world, agent-obstacle, etc.)
-            // FIXED: Increased spring frequency to prevent ground penetration
-            // Higher frequency = stiffer collision response = less penetration
+            // NORMAL COLLISION (agent-obstacle, etc.)
             pairMaterialProperties = new PairMaterialProperties
             {
                 FrictionCoefficient = 0.1f, // Low friction for smooth character movement
                 MaximumRecoveryVelocity = float.MaxValue, // No limit on penetration recovery speed
-                SpringSettings = new SpringSettings(120f, 1f) // INCREASED: 120 Hz (4x stiffer), critically damped
+                SpringSettings = new SpringSettings(120f, 1f) // Standard: 120 Hz, critically damped
             };
         }
         
