@@ -62,9 +62,27 @@ public struct CollisionHandler : INarrowPhaseCallbacks
     /// </summary>
     public bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
     {
-        // FIXED: Increase speculative margin for better collision detection with meshes
-        // This helps prevent tunneling through thin geometry
-        speculativeMargin = Math.Max(speculativeMargin, 0.5f);
+        // FIXED: Use larger speculative margin for ground collisions to prevent penetration
+        // Speculative contacts are created when objects are within this distance
+        // This allows the physics engine to predict and prevent penetration BEFORE it happens
+        // For agent-agent: use smaller margin (0.05) to let them get close
+        // For agent-ground: use larger margin (0.2) to prevent sinking
+        
+        PhysicsEntity? entityA = ResolveEntity(a);
+        PhysicsEntity? entityB = ResolveEntity(b);
+        
+        bool isAgentAgentCollision = IsAgent(entityA) && IsAgent(entityB);
+        
+        if (isAgentAgentCollision)
+        {
+            // Agent-agent: smaller margin for close blocking
+            speculativeMargin = Math.Max(speculativeMargin, 0.05f);
+        }
+        else
+        {
+            // Agent-ground or other: larger margin to prevent penetration
+            speculativeMargin = Math.Max(speculativeMargin, 0.2f);
+        }
         
         // Allow all contacts (no filtering for now)
         return true;
@@ -86,15 +104,43 @@ public struct CollisionHandler : INarrowPhaseCallbacks
     public bool ConfigureContactManifold<TManifold>(int workerIndex, CollidablePair pair, ref TManifold manifold, out PairMaterialProperties pairMaterialProperties) 
         where TManifold : unmanaged, IContactManifold<TManifold>
     {
-        // Configure material properties for stable collision resolution
-        // BepuPhysics v2.4.0 requires proper SpringSettings for contact constraints
-        // Lower friction for character movement (prevent sticking to ground)
-        pairMaterialProperties = new PairMaterialProperties
+        // Resolve entities to check if this is agent-agent collision
+        PhysicsEntity? entityA = ResolveEntity(pair.A);
+        PhysicsEntity? entityB = ResolveEntity(pair.B);
+        
+        // Check if both entities are agents (Player, NPC, Enemy)
+        bool isAgentAgentCollision = IsAgent(entityA) && IsAgent(entityB);
+        
+        // Check if either entity is explicitly pushable
+        bool isPushable = (entityA?.IsPushable ?? false) || (entityB?.IsPushable ?? false);
+        
+        // Configure material properties based on collision type
+        // Agent-agent collisions block unless one is explicitly pushable
+        if (isAgentAgentCollision && !isPushable)
         {
-            FrictionCoefficient = 0.1f, // Low friction for smooth character movement
-            MaximumRecoveryVelocity = 2f, // Maximum velocity for penetration resolution
-            SpringSettings = new SpringSettings(30f, 1f) // frequency: 30 Hz, damping ratio: 1.0 (critically damped)
-        };
+            // AGENT-AGENT COLLISION: Very rigid blocking behavior, no pushing
+            // High spring frequency = stiff contact (like hitting a wall)
+            // Zero maximum recovery = no bouncing or pushing forces
+            // Very low friction = can slide past each other easily (for avoidance)
+            pairMaterialProperties = new PairMaterialProperties
+            {
+                FrictionCoefficient = 0.0f, // Zero friction for easy sliding (agents should slide past each other)
+                MaximumRecoveryVelocity = 0f, // No recovery forces = no pushing!
+                SpringSettings = new SpringSettings(240f, 1f) // Extra stiff (240 Hz), critically damped - prevents any pushing
+            };
+        }
+        else
+        {
+            // NORMAL COLLISION (agent-world, agent-obstacle, etc.)
+            // FIXED: Increased spring frequency to prevent ground penetration
+            // Higher frequency = stiffer collision response = less penetration
+            pairMaterialProperties = new PairMaterialProperties
+            {
+                FrictionCoefficient = 0.1f, // Low friction for smooth character movement
+                MaximumRecoveryVelocity = float.MaxValue, // No limit on penetration recovery speed
+                SpringSettings = new SpringSettings(120f, 1f) // INCREASED: 120 Hz (4x stiffer), critically damped
+            };
+        }
         
         // Detect ground contacts (dynamic entity colliding with static ground)
         if (_groundContactCallbacks?.OnGroundContact != null)
@@ -109,6 +155,34 @@ public struct CollisionHandler : INarrowPhaseCallbacks
         }
         
         return true; // Allow the contact
+    }
+    
+    /// <summary>
+    /// Resolves a collidable reference to a physics entity.
+    /// </summary>
+    private PhysicsEntity? ResolveEntity(CollidableReference collidable)
+    {
+        if (collidable.Mobility == CollidableMobility.Static)
+        {
+            return _entityRegistry.GetEntityByStaticHandle(collidable.StaticHandle);
+        }
+        else
+        {
+            return _entityRegistry.GetEntityByBodyHandle(collidable.BodyHandle);
+        }
+    }
+    
+    /// <summary>
+    /// Checks if an entity is an agent (Player, NPC, or Enemy).
+    /// </summary>
+    private bool IsAgent(PhysicsEntity? entity)
+    {
+        if (entity == null)
+            return false;
+        
+        return entity.EntityType == EntityType.Player ||
+               entity.EntityType == EntityType.NPC ||
+               entity.EntityType == EntityType.Enemy;
     }
     
     /// <summary>

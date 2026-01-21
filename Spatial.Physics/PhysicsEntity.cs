@@ -52,6 +52,13 @@ public class PhysicsEntity
     /// </summary>
     public bool GravityDisabled { get; set; }
     
+    /// <summary>
+    /// Whether this entity can be pushed by other agents.
+    /// When false (default), agent-agent collisions will block instead of push.
+    /// Set to true for special cases like knockback skills, explosions, or explicitly pushable units.
+    /// </summary>
+    public bool IsPushable { get; set; } = false;
+    
     public PhysicsEntity(int entityId, EntityType entityType, BodyHandle bodyHandle, TypedIndex shapeIndex)
     {
         EntityId = entityId;

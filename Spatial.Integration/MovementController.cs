@@ -132,6 +132,7 @@ public class MovementController
             TargetPosition = request.TargetPosition,
             MaxSpeed = request.MaxSpeed,
             AgentHeight = request.AgentHeight,
+            AgentRadius = request.AgentRadius,
             Waypoints = pathResult.Waypoints.ToList(),
             CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, currentPosition, 0),
             LastValidationTime = 0f,
@@ -183,6 +184,9 @@ public class MovementController
     {
         var currentPosition = _physicsWorld.GetEntityPosition(entity);
         
+        // Calculate agent half-height once (used throughout)
+        float agentHalfHeight = (state.AgentHeight * 0.5f) + state.AgentRadius;
+        
         // Update character controller state (grounded/airborne detection)
         var previousState = _characterController.GetState(entity);
         _characterController.UpdateGroundedState(entity, deltaTime);
@@ -192,6 +196,28 @@ public class MovementController
         if (previousState == CharacterState.AIRBORNE && currentState == CharacterState.RECOVERING)
         {
             Console.WriteLine($"[MovementController] Entity {entity.EntityId} landed, recovering...");
+        }
+        
+        // If movement is completed, only apply Y correction to prevent sinking
+        if (state.IsCompleted)
+        {
+            // Keep applying Y correction even when stationary
+            if (_characterController.IsGrounded(entity) && state.Waypoints.Count > 0)
+            {
+                var lastWaypoint = state.Waypoints[^1];
+                float targetY = lastWaypoint.Y + agentHalfHeight;
+                
+                // Apply Y correction
+                float yError = Math.Abs(currentPosition.Y - targetY);
+                if (yError > 0.01f)
+                {
+                    _physicsWorld.SetEntityPosition(entity, new Vector3(currentPosition.X, targetY, currentPosition.Z));
+                }
+                
+                // Keep velocity at zero
+                _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+            }
+            return;
         }
         
         // Check if we've completed the path
@@ -212,7 +238,6 @@ public class MovementController
         var targetWaypoint = state.Waypoints[state.CurrentWaypointIndex];
         
         // Check if agent has deviated too far from navmesh (fallen through, stuck)
-        float agentHalfHeight = state.AgentHeight * 0.5f;
         if (_characterController.HasDeviatedFromNavmesh(entity, targetWaypoint.Y, agentHalfHeight))
         {
             Console.WriteLine($"[MovementController] Agent {entity.EntityId} deviated from navmesh, replanning");
@@ -273,13 +298,34 @@ public class MovementController
                 }
             }
             
-            // Apply XZ velocity for pathfinding (preserve Y velocity for gravity!)
-            var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-            desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
+            // Calculate target Y position for this waypoint
+            float targetY = targetWaypoint.Y + agentHalfHeight;
+            
+            // FIXED: Directly set Y position when grounded to prevent sinking
+            // The physics collision system was allowing penetration, so we use kinematic positioning for Y
+            var currentPos = _physicsWorld.GetEntityPosition(entity);
+            float yError = Math.Abs(currentPos.Y - targetY);
+            
+            if (yError > 0.01f) // More than 1cm off from expected height
+            {
+                // Directly set Y position (kinematic override)
+                _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, targetY, currentPos.Z));
+                
+                // Zero out Y velocity when correcting position
+                var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
+                desiredVelocity = new Vector3(desiredVelocity.X, 0, desiredVelocity.Z);
+            }
+            else
+            {
+                // Position is correct, preserve Y velocity for small variations
+                var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
+                desiredVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
+            }
+            
             _physicsWorld.SetEntityVelocity(entity, desiredVelocity);
             
-            // Apply grounding force to keep stable on navmesh
-            _characterController.ApplyGroundingForce(entity, desiredVelocity);
+            // Apply gentle grounding force to maintain stability
+            _characterController.ApplyGroundingForce(entity, desiredVelocity, targetY, agentHalfHeight);
         }
         else if (_characterController.IsRecovering(entity))
         {
@@ -369,11 +415,12 @@ public class MovementController
     {
         var finalPosition = _physicsWorld.GetEntityPosition(entity);
         
-        // Stop all movement (navmesh-based movement doesn't need gravity)
-        _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+        // FIXED: Keep agent in tracking to continue applying Y correction
+        // Mark as completed so we stop pathfinding but continue height correction
+        state.IsCompleted = true;
         
-        // Remove from tracking
-        _movementStates.Remove(entity.EntityId);
+        // Stop all velocity
+        _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
         
         // Fire completion event
         Console.WriteLine($"[MovementController] Entity {entity.EntityId} reached destination");
@@ -459,6 +506,7 @@ public class MovementController
     /// <summary>
     /// Applies knockback to an entity (e.g., from being hit).
     /// Forces entity into AIRBORNE state and pauses pathfinding.
+    /// Note: Knockback works via direct impulse application, not physics collision forces.
     /// </summary>
     /// <param name="entityId">Entity to knock back</param>
     /// <param name="direction">Direction of knockback (will be normalized)</param>
@@ -474,6 +522,39 @@ public class MovementController
         _physicsWorld.ApplyLinearImpulse(entity, impulse);
         _characterController.SetAirborne(entity); // Force transition to AIRBORNE
         Console.WriteLine($"[MovementController] Entity {entityId} knocked back with force {force} in direction ({direction.X:F2}, {direction.Y:F2}, {direction.Z:F2})");
+    }
+    
+    /// <summary>
+    /// Applies a push to an entity (e.g., from a skill or explosion).
+    /// Unlike Knockback, this can be used while grounded and doesn't force AIRBORNE state.
+    /// Optionally makes the entity temporarily pushable to allow other agents to push it.
+    /// </summary>
+    /// <param name="entityId">Entity to push</param>
+    /// <param name="direction">Direction of push (will be normalized)</param>
+    /// <param name="force">Push force magnitude</param>
+    /// <param name="makePushable">If true, temporarily marks entity as pushable so other agents can push it</param>
+    /// <param name="pushableDuration">How long to keep entity pushable (in seconds)</param>
+    public void Push(int entityId, Vector3 direction, float force, bool makePushable = false, float pushableDuration = 1.0f)
+    {
+        var entity = _physicsWorld.EntityRegistry.GetEntityById(entityId);
+        if (entity == null)
+            return;
+        
+        var normalizedDirection = Vector3.Normalize(direction);
+        var impulse = normalizedDirection * force;
+        _physicsWorld.ApplyLinearImpulse(entity, impulse);
+        
+        // Optionally make entity pushable for a short duration
+        if (makePushable)
+        {
+            _physicsWorld.SetEntityPushable(entity, true);
+            
+            // TODO: Add a timer system to automatically revert pushable state after duration
+            // For now, game logic should manually call SetEntityPushable(entity, false) after the duration
+            Console.WriteLine($"[MovementController] Entity {entityId} is now pushable for {pushableDuration}s");
+        }
+        
+        Console.WriteLine($"[MovementController] Entity {entityId} pushed with force {force} in direction ({direction.X:F2}, {direction.Y:F2}, {direction.Z:F2})");
     }
     
     /// <summary>
@@ -514,10 +595,12 @@ public class MovementController
         public Vector3 TargetPosition { get; set; }
         public float MaxSpeed { get; set; }
         public float AgentHeight { get; set; }
+        public float AgentRadius { get; set; }
         public List<Vector3> Waypoints { get; set; } = new();
         public int CurrentWaypointIndex { get; set; }
         public float LastValidationTime { get; set; }
         public DateTime LastReplanTime { get; set; }
         public DateTime StartTime { get; set; }
         public float TotalDistance { get; set; }
+        public bool IsCompleted { get; set; } = false;
     }

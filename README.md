@@ -67,6 +67,9 @@ All systems are operational and tested end-to-end!
 ✅ Waypoint following  
 ✅ Path request and execution  
 ✅ Collision-aware navigation  
+✅ **Agent blocking behavior** - Agents block each other instead of pushing  
+✅ **Explicit push mechanics** - Push, knockback, and explosion forces  
+✅ **Local avoidance system** - Steering behaviors for dynamic obstacles  
 
 ### 3D Visualization ✨ NEW!
 ✅ Real-time WebSocket streaming  
@@ -123,6 +126,7 @@ See beautiful real-time visualization instead of just numbers!
 
 - **[DOTRECAST_INTEGRATION_STATUS.md](DOTRECAST_INTEGRATION_STATUS.md)** - Complete integration details
 - **[MOVEMENT_FLOW_GUIDE.md](MOVEMENT_FLOW_GUIDE.md)** - Movement system documentation
+- **[AGENT_COLLISION_GUIDE.md](AGENT_COLLISION_GUIDE.md)** - Agent collision and push mechanics guide
 - **[Unity/README.md](Unity/README.md)** - 3D visualization setup
 - **[Unity/QUICK_START.md](Unity/QUICK_START.md)** - 5-minute setup guide
 

@@ -178,13 +178,15 @@ public class PhysicsWorld : IDisposable
         }
         else
         {
-            // Create dynamic body description
+            // FIXED: Always use full inertia tensor for proper collision response
+            // Even for gravity-disabled agents, proper inertia is needed for agent-agent blocking
+            // The GravityPoseIntegrator will check the GravityDisabled flag to skip gravity
             var bodyDescription = new BodyDescription
             {
                 Activity = new BodyActivityDescription(0.01f), // Activity threshold - higher = stays active longer
-                Collidable = new CollidableDescription(shape, 0.5f), // FIXED: Increased speculative margin from 0.1f to 0.5f for better collision detection
+                Collidable = new CollidableDescription(shape, 0.2f), // FIXED: Increased to prevent penetration (overridden per-pair in CollisionHandler)
                 Pose = new RigidPose(position, Quaternion.Identity),
-                LocalInertia = disableGravity ? new BodyInertia { InverseMass = inertia.InverseMass } : inertia
+                LocalInertia = inertia // Always use full inertia for proper collision response
             };
             
             var bodyHandle = _simulation.Bodies.Add(bodyDescription);
@@ -321,6 +323,29 @@ public class PhysicsWorld : IDisposable
             return false;
         
         ApplyLinearImpulse(entity, impulse);
+        return true;
+    }
+    
+    /// <summary>
+    /// Sets whether an entity can be pushed by other agents.
+    /// When false (default), agent-agent collisions will block instead of push.
+    /// When true, the entity can be pushed by skills, explosions, or other agents.
+    /// </summary>
+    public void SetEntityPushable(PhysicsEntity entity, bool isPushable)
+    {
+        entity.IsPushable = isPushable;
+    }
+    
+    /// <summary>
+    /// Sets whether an entity can be pushed by other agents (by entity ID).
+    /// </summary>
+    public bool SetEntityPushable(int entityId, bool isPushable)
+    {
+        var entity = _entityRegistry.GetEntityById(entityId);
+        if (entity == null)
+            return false;
+        
+        entity.IsPushable = isPushable;
         return true;
     }
     

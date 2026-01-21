@@ -247,19 +247,21 @@ public static class TestEnhancedShowcase
                     agentConfig.Radius, agentConfig.Height, agentMass
                 );
 
-                // Spawn agent with capsule center positioned correctly relative to navmesh surface
-                // The validated Start position is already snapped to the navmesh surface
-                // For a capsule in BepuPhysics: position = center of capsule
-                // Therefore: center Y = surface Y + (height / 2)
+                // FIXED: Calculate proper spawn position for capsule
+                // Capsule in BepuPhysics: radius + length (cylinder) + radius
+                // Total height = length + 2*radius = 1.8 + 2*0.4 = 2.6
+                // Half-height (bottom of capsule to center) = (length/2 + radius) = 0.9 + 0.4 = 1.3
+                // For capsule to stand on navmesh surface: center Y = surface Y + half-height
+                float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius; // length/2 + radius
+                
                 var spawnPosition = new Vector3(
                     scenario.Start.X, 
-                    scenario.Start.Y + agentConfig.Height * 0.5f,  // Center of capsule above navmesh surface
+                    scenario.Start.Y + capsuleHalfHeight,  // Center of capsule positioned so bottom touches surface
                     scenario.Start.Z
                 );
 
-                // FIXED: Disable gravity for navmesh agents to prevent falling through ground
-                // CharacterController will enable gravity dynamically when needed (knockback, falling)
-                // This ensures kinematic pathfinding movement works reliably
+                // FIXED: Enable gravity for proper physics simulation
+                // CharacterController will manage grounding and prevent sinking
                 var agent = physicsWorld.RegisterEntityWithInertia(
                     entityId: scenario.EntityId,
                     entityType: EntityType.Player,
@@ -267,7 +269,7 @@ public static class TestEnhancedShowcase
                     shape: agentShape,
                     inertia: agentInertia,
                     isStatic: false,
-                    disableGravity: true  // Disable gravity - agents follow navmesh paths kinematically
+                    disableGravity: false  // Enable gravity for proper physics
                 );
 
                 // Create metric for this agent
@@ -366,7 +368,7 @@ public static class TestEnhancedShowcase
             Console.WriteLine();
             
             // Check initial agent positions (should be on navmesh surface)
-            Console.WriteLine("  Initial agent positions (kinematic, no gravity):");
+            Console.WriteLine("  Initial agent positions (gravity-enabled, will be corrected by kinematic system):");
             foreach (var agent in agentEntities)
             {
                 var pos = physicsWorld.GetEntityPosition(agent);
@@ -374,6 +376,9 @@ public static class TestEnhancedShowcase
             }
             Console.WriteLine();
 
+            // Track agents that failed pathfinding so we can keep them stationary
+            var failedAgents = new List<PhysicsEntity>();
+            
             // Start pathfinding immediately (agents are already at correct positions)
             Console.WriteLine("Phase 5b: Starting pathfinding...");
             foreach (var scenario in validatedScenarios)
@@ -399,12 +404,13 @@ public static class TestEnhancedShowcase
                         if (pathValid)
                         {
                             // IMPROVED: Increase speed from 3.0 to 5.0 for faster goal reaching
-                            // Pass agent height to MovementController for proper Y positioning
+                            // Pass agent height and radius to MovementController for proper Y positioning
                             var moveRequest = new MovementRequest(
                                 scenario.EntityId, 
                                 scenario.Goal, 
                                 maxSpeed: 5.0f, 
-                                agentHeight: agentConfig.Height
+                                agentHeight: agentConfig.Height,
+                                agentRadius: agentConfig.Radius
                             );
                             movementController.RequestMovement(moveRequest);
                             metric.PathfindingRequests = 1;
@@ -423,12 +429,18 @@ public static class TestEnhancedShowcase
                         {
                             Console.WriteLine($"    ⚠ Path crosses invalid terrain");
                             metric.ReachedGoal = false;
+                            
+                            // FIXED: Track this agent to keep it stationary (prevent infinite falling)
+                            failedAgents.Add(entity);
                         }
                     }
                     else
                     {
                         Console.WriteLine($"    ✗ No path found (goal unreachable from settled position)");
                         metric.ReachedGoal = false;
+                        
+                        // FIXED: Track this agent to keep it stationary (prevent infinite falling)
+                        failedAgents.Add(entity);
                     }
                 }
             }
@@ -446,6 +458,33 @@ public static class TestEnhancedShowcase
                 currentStep = i + 1;
                 movementController.UpdateMovement(0.016f);
                 physicsWorld.Update(0.016f);
+                
+                // FIXED: Keep failed agents stationary AND maintain correct Y position
+                // Failed agents have gravity enabled but no pathfinding, so they need explicit Y correction
+                foreach (var failedAgent in failedAgents)
+                {
+                    // Zero velocity to prevent movement
+                    physicsWorld.SetEntityVelocity(failedAgent, Vector3.Zero);
+                    
+                    // Maintain Y position at spawn height to prevent sinking into ground
+                    var currentPos = physicsWorld.GetEntityPosition(failedAgent);
+                    
+                    // Find the original spawn position for this agent
+                    var scenario = validatedScenarios.FirstOrDefault(s => s.EntityId == failedAgent.EntityId);
+                    if (scenario.EntityId != 0)
+                    {
+                        // Calculate expected Y position (spawn surface + capsule half-height)
+                        float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                        float expectedY = scenario.Start.Y + capsuleHalfHeight;
+                        
+                        // Correct Y position if it has drifted
+                        float yError = Math.Abs(currentPos.Y - expectedY);
+                        if (yError > 0.01f) // More than 1cm error
+                        {
+                            physicsWorld.SetEntityPosition(failedAgent, new Vector3(currentPos.X, expectedY, currentPos.Z));
+                        }
+                    }
+                }
 
                 // Update agent metrics
                 foreach (var metric in agentMetrics.Where(m => !m.ReachedGoal))

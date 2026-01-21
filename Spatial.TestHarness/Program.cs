@@ -377,6 +377,18 @@ class Program
                 
                 TestPhysicsPathfindingIntegration.Run(vizServer);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "agent-collision")
+            {
+                // Run agent collision blocking and push mechanic tests
+                Console.WriteLine("[Info] Running AGENT COLLISION & PUSH MECHANICS TESTS\n");
+                Console.WriteLine("[Info] This validates:\n");
+                Console.WriteLine("[Info]   - Agents block each other (no pushing by default)");
+                Console.WriteLine("[Info]   - Push mechanic for skills/abilities");
+                Console.WriteLine("[Info]   - Knockback mechanic for combat");
+                Console.WriteLine("[Info]   - Pushable flag behavior\n");
+                
+                TestAgentCollision.Run(vizServer);
+            }
             else
             {
                 // Run all tests with visualization
@@ -387,6 +399,7 @@ class Program
                 Console.WriteLine("[Info]   Use 'dotnet run -- enhanced [agentCount] [meshPath]' for enhanced test with metrics (RECOMMENDED)");
                 Console.WriteLine("[Info]   Use 'dotnet run -- collision' to test mesh collision system");
                 Console.WriteLine("[Info]   Use 'dotnet run -- physics-pathfinding' to test physics-pathfinding integration");
+                Console.WriteLine("[Info]   Use 'dotnet run -- agent-collision' to test agent blocking and push mechanics");
                 Console.WriteLine("[Info]   Use '--export-navmesh [path]' to export generated NavMesh to OBJ file\n");
                 TestPhysicsCollision(vizServer);
                 Console.WriteLine("\n" + new string('=', 60) + "\n");

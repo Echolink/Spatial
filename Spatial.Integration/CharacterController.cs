@@ -145,18 +145,43 @@ public class CharacterController
     /// Applies grounding force to keep agent stable on ground.
     /// Call this when agent is GROUNDED and following a path.
     /// </summary>
-    public void ApplyGroundingForce(PhysicsEntity entity, Vector3 moveDirection)
+    /// <param name="entity">Entity to apply grounding to</param>
+    /// <param name="moveDirection">Current movement direction</param>
+    /// <param name="targetY">Target Y position (navmesh surface + half-height)</param>
+    /// <param name="agentHalfHeight">Half-height of agent capsule (length/2 + radius)</param>
+    public void ApplyGroundingForce(PhysicsEntity entity, Vector3 moveDirection, float targetY, float agentHalfHeight)
     {
         if (!IsGrounded(entity))
             return;
         
-        // Calculate downward force proportional to movement speed
-        // Faster movement = stronger grounding (prevents sliding off slopes)
-        float horizontalSpeed = MathF.Sqrt(moveDirection.X * moveDirection.X + moveDirection.Z * moveDirection.Z);
-        float groundingForce = _config.GroundingForce * (1.0f + horizontalSpeed * 0.2f);
+        var currentPos = _physicsWorld.GetEntityPosition(entity);
+        var velocity = _physicsWorld.GetEntityVelocity(entity);
         
-        var downwardImpulse = new Vector3(0, -groundingForce * 0.016f, 0); // Scale by typical timestep
-        _physicsWorld.ApplyLinearImpulse(entity, downwardImpulse);
+        // FIXED: Actively correct Y position to prevent sinking into ground
+        // Calculate Y error (how far from expected position)
+        float yError = targetY - currentPos.Y;
+        
+        // If agent has sunk significantly (more than tolerance), apply corrective upward force
+        if (yError > 0.05f) // More than 5cm below expected
+        {
+            // Apply strong upward impulse to correct position
+            float correctionForce = yError * _config.GroundingForce * 2.0f; // Proportional to error
+            var upwardImpulse = new Vector3(0, correctionForce * 0.016f, 0);
+            _physicsWorld.ApplyLinearImpulse(entity, upwardImpulse);
+        }
+        else if (yError < -0.05f) // More than 5cm above expected
+        {
+            // Apply gentle downward force to settle
+            var downwardImpulse = new Vector3(0, yError * _config.GroundingForce * 0.5f * 0.016f, 0);
+            _physicsWorld.ApplyLinearImpulse(entity, downwardImpulse);
+        }
+        
+        // Cancel any significant upward velocity to prevent bouncing/floating
+        if (velocity.Y > 0.5f)
+        {
+            var dampedVelocity = new Vector3(velocity.X, velocity.Y * 0.3f, velocity.Z);
+            _physicsWorld.SetEntityVelocity(entity, dampedVelocity);
+        }
     }
     
     /// <summary>

@@ -23,17 +23,24 @@ public class MovementRequest
     public float MaxSpeed { get; }
     
     /// <summary>
-    /// Agent height (total capsule height) for proper Y positioning.
+    /// Agent height (capsule cylinder length) for proper Y positioning.
     /// Used to calculate capsule center position relative to navmesh surface.
     /// </summary>
     public float AgentHeight { get; }
     
-    public MovementRequest(int entityId, Vector3 targetPosition, float maxSpeed = 5.0f, float agentHeight = 2.0f)
+    /// <summary>
+    /// Agent radius (capsule radius) for proper Y positioning.
+    /// Used to calculate capsule center position relative to navmesh surface.
+    /// </summary>
+    public float AgentRadius { get; }
+    
+    public MovementRequest(int entityId, Vector3 targetPosition, float maxSpeed = 5.0f, float agentHeight = 2.0f, float agentRadius = 0.4f)
     {
         EntityId = entityId;
         TargetPosition = targetPosition;
         MaxSpeed = maxSpeed;
         AgentHeight = agentHeight;
+        AgentRadius = agentRadius;
     }
 }
 
