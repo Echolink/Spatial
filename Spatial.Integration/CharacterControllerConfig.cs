@@ -44,7 +44,9 @@ public class CharacterControllerConfig
     /// <summary>
     /// Maximum deviation from navmesh Y before replanning (units).
     /// If agent deviates more than this vertically, trigger replan.
-    /// Default: 2.0f
+    /// NOTE: This is now deprecated - use PathfindingConfiguration.FloorLevelTolerance instead.
+    /// Default: 5.0f (increased to handle multi-level scenarios)
     /// </summary>
-    public float MaxNavmeshDeviation { get; set; } = 2.0f;
+    [Obsolete("Use PathfindingConfiguration.FloorLevelTolerance instead")]
+    public float MaxNavmeshDeviation { get; set; } = 5.0f;
 }

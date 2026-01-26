@@ -75,7 +75,7 @@ public static class TestAgentCollision
             };
             
             var entityManager = new EntityManager(physicsWorld);
-            var movementController = new MovementController(physicsWorld, pathfinder, config);
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, config);
             
             Console.WriteLine("   ✓ Systems initialized\n");
             
@@ -137,7 +137,7 @@ public static class TestAgentCollision
             var agent1Dest = new Vector3(0, 0, 0);  // Center
             var agent2Dest = new Vector3(0, 0, 0);  // Center
             
-            movementController.RequestMovement(new MovementRequest(
+            var response1 = movementController.RequestMovement(new MovementRequest(
                 agent1Handle.EntityId,
                 agent1Dest,
                 maxSpeed: 2.0f,
@@ -145,13 +145,23 @@ public static class TestAgentCollision
                 agentRadius: agentConfig.Radius
             ));
             
-            movementController.RequestMovement(new MovementRequest(
+            if (!response1.Success)
+            {
+                Console.WriteLine($"   ✗ Agent 1 movement failed: {response1.Message}");
+            }
+            
+            var response2 = movementController.RequestMovement(new MovementRequest(
                 agent2Handle.EntityId,
                 agent2Dest,
                 maxSpeed: 2.0f,
                 agentHeight: agentConfig.Height,
                 agentRadius: agentConfig.Radius
             ));
+            
+            if (!response2.Success)
+            {
+                Console.WriteLine($"   ✗ Agent 2 movement failed: {response2.Message}");
+            }
             
             Console.WriteLine("   ✓ Movement commands issued\n");
             

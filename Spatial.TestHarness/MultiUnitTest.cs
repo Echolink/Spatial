@@ -73,7 +73,7 @@ public static class MultiUnitTest
             };
             
             var entityManager = new EntityManager(physicsWorld);
-            var movementController = new MovementController(physicsWorld, pathfinder, config);
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, config);
             var collisionSystem = new CollisionEventSystem(physicsWorld);
             
             Console.WriteLine("   ✓ All systems initialized\n");
@@ -168,8 +168,8 @@ public static class MultiUnitTest
                     maxSpeed: 3.0f
                 );
                 
-                bool started = movementController.RequestMovement(request);
-                if (started)
+                var movementResponse = movementController.RequestMovement(request);
+                if (movementResponse.Success)
                 {
                     var entity = physicsWorld.EntityRegistry.GetEntityById(unitHandles[i].EntityId);
                     var currentPos = physicsWorld.GetEntityPosition(entity!);

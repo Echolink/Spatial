@@ -75,7 +75,7 @@ public static class TestLocalAvoidance
             };
             
             var entityManager = new EntityManager(physicsWorld);
-            var movementController = new MovementController(physicsWorld, pathfinder, config);
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, config);
             
             Console.WriteLine("   ✓ Systems initialized\n");
             
@@ -139,7 +139,7 @@ public static class TestLocalAvoidance
             Console.WriteLine("   They should avoid each other when they meet in the middle!\n");
             
             // Agent 1 goes to where Agent 2 started
-            movementController.RequestMovement(new MovementRequest(
+            var response1 = movementController.RequestMovement(new MovementRequest(
                 agent1Handle.EntityId,
                 new Vector3(8, 0, 0),
                 maxSpeed: 2.0f,
@@ -147,14 +147,24 @@ public static class TestLocalAvoidance
                 agentRadius: agentConfig.Radius
             ));
             
+            if (!response1.Success)
+            {
+                Console.WriteLine($"   ✗ Agent 1 movement failed: {response1.Message}");
+            }
+            
             // Agent 2 goes to where Agent 1 started
-            movementController.RequestMovement(new MovementRequest(
+            var response2 = movementController.RequestMovement(new MovementRequest(
                 agent2Handle.EntityId,
                 new Vector3(-8, 0, 0),
                 maxSpeed: 2.0f,
                 agentHeight: agentConfig.Height,
                 agentRadius: agentConfig.Radius
             ));
+            
+            if (!response2.Success)
+            {
+                Console.WriteLine($"   ✗ Agent 2 movement failed: {response2.Message}");
+            }
             
             Console.WriteLine("   ✓ Movement commands issued\n");
             

@@ -171,7 +171,58 @@ bool HasEntitiesInRadius(Vector3 position, float radius, EntityType? type);
 - `SeparationRadius` (2.0) - Repulsion distance for separation
 - `TryLocalAvoidanceFirst` (true) - Try avoidance before replanning for temporary obstacles
 
-### 11. Enhanced EntityType (`Spatial.Physics/EntityType.cs`)
+### 11. Configuration Alignment System ⭐ NEW!
+
+**Date Implemented**: 2026-01-26  
+**Document**: `CONFIGURATION_ALIGNMENT.md`
+
+**Purpose**: Ensure physical agent constraints (MaxClimb, MaxSlope) are consistently applied across all systems
+
+**Problem Solved**:
+Previously, agent constraints were defined in multiple places that could drift apart:
+- `AgentConfig` (NavMesh generation)
+- `PathfindingConfiguration` (Path validation)
+- `CharacterController` (Movement execution)
+
+**Solution**:
+**AgentConfig is now the single source of truth** for all physical constraints.
+
+**Architecture**:
+```
+AgentConfig (SINGLE SOURCE OF TRUTH)
+    ├──→ NavMeshBuilder (voxel-level MaxClimb)
+    ├──→ PathfindingService (segment-level MaxClimb)
+    └──→ MovementController (runtime MaxClimb)
+```
+
+**Implementation Changes**:
+1. **PathfindingService** now requires `AgentConfig` parameter
+2. **MovementController** now requires `AgentConfig` parameter
+3. Automatic validation warns about configuration misalignment
+4. All test files updated to pass `AgentConfig` consistently
+
+**Benefits**:
+- ✅ Prevents configuration drift
+- ✅ Ensures NavMesh, Pathfinding, and Physics use same constraints
+- ✅ Clear ownership: AgentConfig owns physical constraints
+- ✅ Alignment with BepuPhysics guaranteed
+
+**Example**:
+```csharp
+// Single source of truth
+var agentConfig = new AgentConfig 
+{ 
+    MaxClimb = 0.5f,
+    MaxSlope = 45.0f 
+};
+
+// All systems use the same config
+var navMeshData = builder.BuildNavMeshDirect(agentConfig);
+var pathfindingService = new PathfindingService(pathfinder, agentConfig);
+var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
+```
+
+### 12. Enhanced EntityType (`Spatial.Physics/EntityType.cs`)
 
 **New Types Added**:
 - `Obstacle` - Dynamic obstacles
@@ -207,7 +258,20 @@ bool HasEntitiesInRadius(Vector3 position, float radius, EntityType? type);
 ```csharp
 // Initialize systems
 var physicsWorld = new PhysicsWorld();
+
+// Define agent configuration (single source of truth)
+var agentConfig = new AgentConfig
+{
+    Height = 1.8f,
+    Radius = 0.5f,
+    MaxClimb = 0.5f,
+    MaxSlope = 45.0f
+};
+
+// Build NavMesh with AgentConfig
+var navMeshData = navMeshBuilder.BuildNavMeshDirect(agentConfig);
 var pathfinder = new Pathfinder(navMeshData);
+
 var config = new PathfindingConfiguration 
 { 
     PathValidationInterval = 0.5f,
@@ -215,7 +279,7 @@ var config = new PathfindingConfiguration
 };
 
 var entityManager = new EntityManager(physicsWorld);
-var movementController = new MovementController(physicsWorld, pathfinder, config);
+var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, config);  // ← Pass AgentConfig
 var collisionSystem = new CollisionEventSystem(physicsWorld);
 
 // Subscribe to events
@@ -303,14 +367,78 @@ Spatial.Physics/
 └── PhysicsWorld.cs (enhanced)
 ```
 
+## Phase 2: Movement Testing & Critical Bug Fix (2026-01-26)
+
+### Bug Fixed: MovementController Bypassing Path Validation
+
+**Problem**: `MovementController` was calling `_pathfinder.FindPath()` directly instead of `_pathfindingService.FindPath()`, completely bypassing the path validation and auto-fix system implemented in Phase 1.
+
+**Impact**: Agent-3's invalid path (8.8m climb exceeding 0.5m MaxClimb) was never validated or auto-fixed, causing the agent to fall through the world.
+
+**Fix**: Changed two locations in `MovementController.cs`:
+- Line ~226: Initial pathfinding in `RequestMovement()`
+- Line ~708: Replanning in `ReplanPath()`
+
+```csharp
+// BEFORE (bypassed validation):
+var pathResult = _pathfinder.FindPath(start, end, extents);
+
+// AFTER (uses validation + auto-fix):
+var pathResult = _pathfindingService.FindPath(start, end, extents);
+```
+
+### Phase 2 Test Results
+
+**Test Scenario**: Agent-3 climbing from Y=-2.17 to Y=7.83 (10m vertical climb over 14m horizontal)
+
+**Before Fix**:
+- ❌ Agent fell to Y=-550.75m (through world)
+- ❌ Path had 8.8m climb between waypoints (violates 0.5m MaxClimb)
+- ❌ No validation messages in output
+
+**After Fix**:
+- ✅ Path validation works: "Segment 0→1 exceeds MaxClimb: 0.90m > 0.50m"
+- ✅ Auto-fix succeeds: "original: 5 waypoints, fixed: 23 waypoints"
+- ⚠️ Physics execution fails: Agent launched to Y=36.5m, fell, ended at Y=4.5m
+- ❌ Agent did not reach goal (39.5m away)
+
+### Root Cause: Physics Execution Gap
+
+PathAutoFix successfully makes paths mathematically compliant, but the current **velocity-based CharacterController** cannot physically execute steep multi-level climbs:
+
+1. **Steep cumulative grade**: 10m rise over 14m horizontal = 71.5% grade (beyond 45° MaxSlope)
+2. **Physics instability**: Velocity-based movement causes bouncing/launching on steep slopes
+3. **Loss of ground contact**: Agent loses navmesh contact during bounce
+4. **No recovery**: Once airborne, replanning fails (not on navmesh)
+
+### Next Steps: Motor-Based Character Controller
+
+**Recommendation**: Implement `MotorCharacterController` using BepuPhysics v2 motor constraints:
+
+**Why Motors?**
+- BepuPhysics recommended approach for character movement
+- Natural ground contact maintenance via physics solver
+- Smooth handling of slopes and climbs
+- No velocity explosions
+
+**Implementation Plan**:
+1. Create `MotorCharacterController.cs` with motor constraints
+2. Analyze ground contacts for supporting surfaces
+3. Create `TestMotorVsVelocity.cs` comparison test
+4. Validate Agent-3 success with motor approach
+
+See `PHASE2_MOVEMENT_TEST_RESULTS.md` for detailed analysis.
+
 ## Summary
 
-All planned components have been successfully implemented, providing a production-ready integration system that follows 2026 best practices for game server architecture. The system is:
+The core integration system is complete and working. Path validation and auto-fix successfully addresses the DotRecast-BepuPhysics gap at the pathfinding level. However, Phase 2 testing revealed that steep multi-level terrain requires a motor-based physics approach for stable execution. The system is:
 
 - ✅ Event-driven with clean separation of concerns
 - ✅ Command pattern for game server interactions
 - ✅ Collision tracking with type-based filtering
 - ✅ Dynamic obstacle handling (local avoidance + replanning)
+- ✅ Path validation and auto-fix working correctly
 - ✅ Fully configurable behavior
 - ✅ Server-authoritative
 - ✅ Performance-optimized with throttling and spatial queries
+- 🔨 Motor-based movement needed for steep terrain (in progress)

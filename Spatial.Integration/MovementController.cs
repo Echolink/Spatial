@@ -28,10 +28,11 @@ public class MovementController
 {
     private readonly PhysicsWorld _physicsWorld;
     private readonly Pathfinder _pathfinder;
-    private readonly PathValidator _pathValidator;
+    private readonly PathfindingService _pathfindingService;
+    // private readonly PathValidator _pathValidator;  // TODO: Implement dynamic path validation
     private readonly LocalAvoidance _localAvoidance;
     private readonly PathfindingConfiguration _config;
-    private readonly CharacterController _characterController;
+    private readonly ICharacterController _characterController;
     
     private readonly Dictionary<int, MovementState> _movementStates = new();
     
@@ -69,22 +70,70 @@ public class MovementController
     }
     
     /// <summary>
-    /// Creates a new movement controller.
+    /// Creates a new movement controller with velocity-based character controller.
     /// </summary>
-    public MovementController(PhysicsWorld physicsWorld, Pathfinder pathfinder, PathfindingConfiguration? config = null, CharacterControllerConfig? characterConfig = null)
+    /// <param name="physicsWorld">Physics world instance</param>
+    /// <param name="pathfinder">Pathfinder instance (should use same AgentConfig as this controller)</param>
+    /// <param name="agentConfig">Agent configuration (SINGLE SOURCE OF TRUTH for MaxClimb, MaxSlope, etc.)</param>
+    /// <param name="config">Optional pathfinding behavior configuration</param>
+    /// <param name="characterConfig">Optional character controller configuration</param>
+    public MovementController(
+        PhysicsWorld physicsWorld, 
+        Pathfinder pathfinder, 
+        AgentConfig agentConfig,
+        PathfindingConfiguration? config = null, 
+        CharacterControllerConfig? characterConfig = null)
+        : this(physicsWorld, new PathfindingService(pathfinder, agentConfig, config ?? new PathfindingConfiguration()), 
+               agentConfig, config, new CharacterController(physicsWorld, characterConfig))
+    {
+    }
+    
+    /// <summary>
+    /// Creates a new movement controller with explicit PathfindingService and velocity-based character controller.
+    /// </summary>
+    public MovementController(
+        PhysicsWorld physicsWorld,
+        PathfindingService pathfindingService,
+        AgentConfig agentConfig,
+        PathfindingConfiguration? config = null,
+        CharacterController? characterController = null)
+        : this(physicsWorld, pathfindingService, agentConfig, config, 
+               (ICharacterController)(characterController ?? new CharacterController(physicsWorld)))
+    {
+    }
+    
+    /// <summary>
+    /// Creates a new movement controller with motor-based character controller.
+    /// </summary>
+    public MovementController(
+        PhysicsWorld physicsWorld,
+        PathfindingService pathfindingService,
+        AgentConfig agentConfig,
+        PathfindingConfiguration? config = null,
+        MotorCharacterController? motorController = null)
+        : this(physicsWorld, pathfindingService, agentConfig, config,
+               (ICharacterController)(motorController ?? new MotorCharacterController(physicsWorld)))
+    {
+    }
+    
+    /// <summary>
+    /// Core constructor - accepts any character controller implementation.
+    /// </summary>
+    private MovementController(
+        PhysicsWorld physicsWorld,
+        PathfindingService pathfindingService,
+        AgentConfig agentConfig,
+        PathfindingConfiguration? config,
+        ICharacterController characterController)
     {
         _physicsWorld = physicsWorld;
-        _pathfinder = pathfinder;
+        _pathfinder = pathfindingService.Pathfinder;
+        _pathfindingService = pathfindingService;
         _config = config ?? new PathfindingConfiguration();
-        _pathValidator = new PathValidator(physicsWorld);
         _localAvoidance = new LocalAvoidance(physicsWorld, _config.LocalAvoidanceRadius);
-        
-        // Create character controller for physics-pathfinding integration
-        _characterController = new CharacterController(physicsWorld, characterConfig);
+        _characterController = characterController;
         
         // Register ground contact callbacks with physics world
-        // Note: This requires PhysicsWorld to be created with these callbacks for best performance
-        // For now, we'll register them here (they may not work if PhysicsWorld was created earlier)
         physicsWorld.RegisterGroundContactCallbacks(
             onGroundContact: (dynamicEntity, groundEntity) => 
                 _characterController.NotifyGroundContact(dynamicEntity, groundEntity),
@@ -94,16 +143,35 @@ public class MovementController
     }
     
     /// <summary>
+    /// Creates a new movement controller (legacy overload for backwards compatibility).
+    /// Uses default AgentConfig values. Prefer the overload that accepts AgentConfig.
+    /// </summary>
+    [Obsolete("Use constructor with AgentConfig parameter for proper configuration alignment")]
+    public MovementController(PhysicsWorld physicsWorld, Pathfinder pathfinder, PathfindingConfiguration? config = null, CharacterControllerConfig? characterConfig = null)
+        : this(physicsWorld, pathfinder, new AgentConfig(), config, characterConfig)
+    {
+        Console.WriteLine("[MovementController] WARNING: Using legacy constructor without AgentConfig.");
+        Console.WriteLine("[MovementController] Consider using constructor with AgentConfig for proper alignment.");
+    }
+    
+    /// <summary>
     /// Requests movement for an entity to a target position.
     /// Uses pathfinding to find a valid path, then applies physics-based movement.
+    /// Automatically snaps positions to navmesh using downward-priority vertical search.
     /// </summary>
     /// <param name="request">Movement request</param>
-    /// <returns>True if movement was initiated successfully</returns>
-    public bool RequestMovement(MovementRequest request)
+    /// <returns>MovementResponse with detailed feedback about the movement operation</returns>
+    public MovementResponse RequestMovement(MovementRequest request)
     {
         var entity = _physicsWorld.EntityRegistry.GetEntityById(request.EntityId);
         if (entity == null)
-            return false;
+        {
+            return new MovementResponse(
+                $"Entity {request.EntityId} not found",
+                Vector3.Zero,
+                request.TargetPosition
+            );
+        }
         
         // Get current position
         var currentPosition = _physicsWorld.GetEntityPosition(entity);
@@ -112,9 +180,100 @@ public class MovementController
         Console.WriteLine($"[MovementController] Current position: ({currentPosition.X:F2}, {currentPosition.Y:F2}, {currentPosition.Z:F2})");
         Console.WriteLine($"[MovementController] Target position: ({request.TargetPosition.X:F2}, {request.TargetPosition.Y:F2}, {request.TargetPosition.Z:F2})");
         
-        // Find path using pathfinding
-        var extents = new Vector3(5.0f, 10.0f, 5.0f);
-        var pathResult = _pathfinder.FindPath(currentPosition, request.TargetPosition, extents);
+        // Determine search extents (use request override or config defaults)
+        var searchExtents = request.SearchExtents ?? new Vector3(
+            _config.HorizontalSearchExtent,
+            _config.VerticalSearchExtent,
+            _config.HorizontalSearchExtent
+        );
+        
+        // CRITICAL FIX: For grounded agents, use ground contact point to validate navmesh
+        // Don't re-snap start position - agent is already settled on valid ground
+        // Only check if the ground beneath the agent is on navmesh
+        
+        float agentHalfHeight = (request.AgentHeight / 2.0f) + request.AgentRadius;
+        
+        // Calculate agent's ground contact point (bottom of capsule)
+        float groundY = currentPosition.Y - agentHalfHeight;
+        var groundContactPoint = new Vector3(currentPosition.X, groundY, currentPosition.Z);
+        
+        Console.WriteLine($"[MovementController] Agent center: Y={currentPosition.Y:F2}");
+        Console.WriteLine($"[MovementController] Ground contact: Y={groundY:F2}");
+        
+        // Check if ground contact point is near a navmesh surface
+        // CRITICAL FIX: Use much larger search extents to handle cases where agent spawns
+        // far from the nearest walkable navmesh polygon (e.g., off-mesh, in non-walkable areas)
+        // Horizontal: 50m should cover most reasonable spawn distances
+        // Vertical: 10m should handle multi-level scenarios
+        var smallSearchExtents = new Vector3(50.0f, 10.0f, 50.0f);
+        var nearestNavmesh = _pathfindingService.FindNearestValidPosition(groundContactPoint, smallSearchExtents);
+        
+        Vector3 snappedStart;
+        if (nearestNavmesh != null)
+        {
+            // Calculate 3D distance (not just Y distance) to nearest navmesh point
+            float horizontalDist = MathF.Sqrt(
+                (nearestNavmesh.Value.X - currentPosition.X) * (nearestNavmesh.Value.X - currentPosition.X) +
+                (nearestNavmesh.Value.Z - currentPosition.Z) * (nearestNavmesh.Value.Z - currentPosition.Z)
+            );
+            float verticalDist = Math.Abs(nearestNavmesh.Value.Y - groundY);
+            float totalDist = MathF.Sqrt(horizontalDist * horizontalDist + verticalDist * verticalDist);
+            
+            Console.WriteLine($"[MovementController] Nearest navmesh: ({nearestNavmesh.Value.X:F2}, {nearestNavmesh.Value.Y:F2}, {nearestNavmesh.Value.Z:F2})");
+            Console.WriteLine($"[MovementController]   Horizontal distance: {horizontalDist:F2}m, Vertical distance: {verticalDist:F2}m, Total: {totalDist:F2}m");
+            
+            // CRITICAL FIX: If agent is far from navmesh, snap to nearest valid position
+            // This handles cases where agents spawn in non-walkable areas or off-mesh
+            if (horizontalDist > 2.0f)
+            {
+                Console.WriteLine($"[MovementController] Agent spawned off navmesh, teleporting to nearest valid position");
+                // Teleport agent to nearest navmesh position
+                var teleportPos = new Vector3(nearestNavmesh.Value.X, nearestNavmesh.Value.Y + agentHalfHeight, nearestNavmesh.Value.Z);
+                _physicsWorld.SetEntityPosition(entity, teleportPos);
+                snappedStart = teleportPos;
+                Console.WriteLine($"[MovementController]   Teleported to: ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
+            }
+            else
+            {
+                // Agent is close to navmesh horizontally, just align Y coordinate
+                snappedStart = new Vector3(currentPosition.X, nearestNavmesh.Value.Y + agentHalfHeight, currentPosition.Z);
+                Console.WriteLine($"[MovementController] Agent near valid navmesh, aligning Y coordinate");
+            }
+        }
+        else
+        {
+            return new MovementResponse(
+                $"No navmesh found near agent's ground contact point (Y={groundY:F2})",
+                currentPosition,
+                request.TargetPosition
+            );
+        }
+        
+        // Snap target position to navmesh (use provided Y as search starting point)
+        var snappedTarget = _pathfindingService.FindNearestValidPosition(request.TargetPosition, searchExtents);
+        if (snappedTarget == null)
+        {
+            return new MovementResponse(
+                $"Target position not on navmesh (no walkable surface found within search extents)",
+                snappedStart,
+                request.TargetPosition
+            );
+        }
+        
+        Console.WriteLine($"[MovementController] Start position: ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
+        Console.WriteLine($"[MovementController] Target position: ({snappedTarget.Value.X:F2}, {snappedTarget.Value.Y:F2}, {snappedTarget.Value.Z:F2})");
+        
+        // REMOVED: Position correction - agent is already at correct position after settling
+        // No need to teleport agent - it's standing on valid ground
+        
+        // Find path using snapped positions
+        var pathfindingExtents = new Vector3(
+            _config.PathfindingSearchExtentsHorizontal,
+            _config.PathfindingSearchExtentsVertical,
+            _config.PathfindingSearchExtentsHorizontal
+        );
+        // CRITICAL FIX: Use PathfindingService instead of raw Pathfinder to get validation + auto-fix
+        var pathResult = _pathfindingService.FindPath(snappedStart, snappedTarget.Value, pathfindingExtents);
         
         Console.WriteLine($"[MovementController] Pathfinding result: Success={pathResult.Success}");
         if (pathResult.Success)
@@ -123,18 +282,24 @@ public class MovementController
         }
         
         if (!pathResult.Success)
-            return false;
+        {
+            return new MovementResponse(
+                $"No valid path found from start to target",
+                snappedStart,
+                snappedTarget.Value
+            );
+        }
         
-        // Store movement state
+        // Store movement state (use snapped target, not original request)
         var state = new MovementState
         {
             EntityId = request.EntityId,
-            TargetPosition = request.TargetPosition,
+            TargetPosition = snappedTarget.Value, // Use snapped position
             MaxSpeed = request.MaxSpeed,
             AgentHeight = request.AgentHeight,
             AgentRadius = request.AgentRadius,
             Waypoints = pathResult.Waypoints.ToList(),
-            CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, currentPosition, 0),
+            CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, snappedStart, 0),
             LastValidationTime = 0f,
             LastReplanTime = DateTime.MinValue,
             StartTime = DateTime.UtcNow,
@@ -143,24 +308,51 @@ public class MovementController
         
         _movementStates[request.EntityId] = state;
         
-        // Fire movement started event
-        OnMovementStarted?.Invoke(request.EntityId, currentPosition, request.TargetPosition);
+        // Fire movement started event (use snapped positions)
+        OnMovementStarted?.Invoke(request.EntityId, snappedStart, snappedTarget.Value);
         
         // Start moving toward first valid waypoint
         if (state.CurrentWaypointIndex < state.Waypoints.Count)
         {
-            MoveTowardWaypoint(entity, state.Waypoints[state.CurrentWaypointIndex], currentPosition, request.MaxSpeed);
+            MoveTowardWaypoint(entity, state.Waypoints[state.CurrentWaypointIndex], snappedStart, request.MaxSpeed);
         }
         
-        return true;
+        // Return success response with actual positions
+        return new MovementResponse(
+            snappedStart,
+            snappedTarget.Value,
+            pathResult,
+            request.MaxSpeed
+        );
     }
     
     /// <summary>
     /// Updates movement for all entities.
     /// Call this every frame to continue movement along paths.
+    /// Also updates grounded state for ALL agents even without active movement.
     /// </summary>
     public void UpdateMovement(float deltaTime)
     {
+        // First, update grounded state for ALL agents (even those without movement states)
+        // This prevents idle agents from sinking through the ground
+        var allAgents = _physicsWorld.EntityRegistry.GetAllEntities()
+            .Where(e => !e.IsStatic && (e.EntityType == EntityType.Player || 
+                                        e.EntityType == EntityType.NPC || 
+                                        e.EntityType == EntityType.Enemy))
+            .ToList();
+        
+        foreach (var agent in allAgents)
+        {
+            _characterController.UpdateGroundedState(agent, deltaTime);
+            
+            // Apply idle grounding to agents without active movement states
+            if (!_movementStates.ContainsKey(agent.EntityId))
+            {
+                _characterController.ApplyIdleGrounding(agent);
+            }
+        }
+        
+        // Then update entities with active movement states
         var entitiesToUpdate = _movementStates.Keys.ToList();
         
         foreach (var entityId in entitiesToUpdate)
@@ -198,25 +390,11 @@ public class MovementController
             Console.WriteLine($"[MovementController] Entity {entity.EntityId} landed, recovering...");
         }
         
-        // If movement is completed, only apply Y correction to prevent sinking
+        // If movement is completed, stop all movement
         if (state.IsCompleted)
         {
-            // Keep applying Y correction even when stationary
-            if (_characterController.IsGrounded(entity) && state.Waypoints.Count > 0)
-            {
-                var lastWaypoint = state.Waypoints[^1];
-                float targetY = lastWaypoint.Y + agentHalfHeight;
-                
-                // Apply Y correction
-                float yError = Math.Abs(currentPosition.Y - targetY);
-                if (yError > 0.01f)
-                {
-                    _physicsWorld.SetEntityPosition(entity, new Vector3(currentPosition.X, targetY, currentPosition.Z));
-                }
-                
-                // Keep velocity at zero
-                _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
-            }
+            // Keep velocity at zero
+            _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
             return;
         }
         
@@ -237,10 +415,22 @@ public class MovementController
         
         var targetWaypoint = state.Waypoints[state.CurrentWaypointIndex];
         
-        // Check if agent has deviated too far from navmesh (fallen through, stuck)
-        if (_characterController.HasDeviatedFromNavmesh(entity, targetWaypoint.Y, agentHalfHeight))
+        // Check if agent is on completely wrong floor (multi-level aware)
+        // Calculate once for both floor check and slope handling
+        float heightDiff = Math.Abs(targetWaypoint.Y - (currentPosition.Y - agentHalfHeight));
+        float horizontalDist = CalculateXZDistance(currentPosition, targetWaypoint);
+        bool isOnSlope = heightDiff > 0.5f && horizontalDist > 0.1f;
+        
+        // Use larger tolerance on slopes to account for physics settling
+        float floorTolerance = isOnSlope ? _config.FloorLevelTolerance * 2.0f : _config.FloorLevelTolerance;
+        
+        if (!IsOnCorrectFloor(currentPosition, targetWaypoint, agentHalfHeight, floorTolerance))
         {
-            Console.WriteLine($"[MovementController] Agent {entity.EntityId} deviated from navmesh, replanning");
+            float currentGroundY = currentPosition.Y - agentHalfHeight;
+            float targetGroundY = targetWaypoint.Y;
+            float floorDiff = Math.Abs(currentGroundY - targetGroundY);
+            Console.WriteLine($"[MovementController] Agent {entity.EntityId} on wrong floor - replanning");
+            Console.WriteLine($"  CurrentGroundY={currentGroundY:F2}, TargetGroundY={targetGroundY:F2}, Diff={floorDiff:F2}, Tolerance={floorTolerance:F2}");
             ReplanPath(entity, state, currentPosition);
             return;
         }
@@ -349,13 +539,11 @@ public class MovementController
         // State-aware movement: only apply pathfinding when GROUNDED
         if (_characterController.IsGrounded(entity))
         {
-            // Calculate desired velocity toward waypoint
-            // If avoiding collision, reduce speed to 75% to allow smoother passing
+            // Calculate desired XZ velocity toward waypoint
             float effectiveSpeed = state.IsAvoidingCollision ? state.MaxSpeed * 0.75f : state.MaxSpeed;
             var desiredVelocity = CalculateDesiredVelocity(currentPosition, targetWaypoint, effectiveSpeed);
             
-            // Apply local avoidance if enabled (but only for minor adjustments, not head-on collisions)
-            // Head-on collisions are handled by collision prediction + replanning above
+            // Apply local avoidance if enabled
             if (_config.EnableLocalAvoidance)
             {
                 var nearbyEntities = _localAvoidance.GetNearbyEntities(
@@ -364,7 +552,6 @@ public class MovementController
                     _config.MaxAvoidanceNeighbors
                 );
                 
-                // Only apply steering if there are no critical collisions predicted
                 if (nearbyEntities.Count > 0)
                 {
                     var currentVel = _physicsWorld.GetEntityVelocity(entity);
@@ -377,7 +564,6 @@ public class MovementController
                     
                     bool hasCriticalCollision = predictions.Any(p => p.ShouldReplan);
                     
-                    // Only use steering for non-critical situations
                     if (!hasCriticalCollision)
                     {
                         desiredVelocity = _localAvoidance.CalculateAvoidanceVelocity(
@@ -389,108 +575,122 @@ public class MovementController
                 }
             }
             
-            // Calculate target Y position for this waypoint
-            float targetY = targetWaypoint.Y + agentHalfHeight;
-            
-            // CRITICAL FIX: Prevent both sinking AND unwanted vertical displacement
-            // When agents collide, collision forces can push them upward (observed: Y jumped to 3.19)
-            // We need to aggressively clamp vertical position and velocity
-            var currentPos = _physicsWorld.GetEntityPosition(entity);
-            float yError = currentPos.Y - targetY;
-            
-            // Check if agent is near other agents (collision might be causing displacement)
-            bool nearOtherAgents = false;
-            if (_config.EnableLocalAvoidance)
+            // Check for edge before applying movement
+            // CRITICAL: Only stop if edge is NOT part of the planned path
+            // If the path ahead requires going down/up (ramp/slope), trust the pathfinding
+            bool isExpectedElevationChange = false;
+            if (state.CurrentWaypointIndex < state.Waypoints.Count)
             {
-                var nearbyEntities = _localAvoidance.GetNearbyEntities(
-                    currentPos, 
-                    entity.EntityId, 
-                    _config.MaxAvoidanceNeighbors
-                );
-                nearOtherAgents = nearbyEntities.Count > 0;
+                // Check elevation change from current position to target waypoint
+                float elevationChange = Math.Abs(targetWaypoint.Y - (currentPosition.Y - agentHalfHeight));
+                isExpectedElevationChange = elevationChange > 2.0f; // Path expects significant elevation change
+                
+                // Also check if final destination requires elevation change
+                var finalWaypoint = state.Waypoints[^1];
+                float totalElevationChange = Math.Abs(finalWaypoint.Y - (currentPosition.Y - agentHalfHeight));
+                if (totalElevationChange > 3.0f)
+                    isExpectedElevationChange = true;
             }
             
-            // STRICT Y CONSTRAINT: When grounded, agents should NEVER deviate significantly from targetY
-            // Maximum allowed deviation: 10cm (prevents the Y=3.19 jumping issue)
-            float maxYDeviation = 0.10f; // 10cm maximum
-            
-            // Use even stricter thresholds when near other agents to prevent collision displacement
-            float yTolerance = nearOtherAgents ? 0.005f : 0.01f; // 0.5cm when near others, 1cm normally
-            
-            if (Math.Abs(yError) > yTolerance)
+            if (!isExpectedElevationChange && WouldFallOffEdge(entity, currentPosition, desiredVelocity, state.AgentRadius))
             {
-                // Clamp Y position to prevent excessive displacement
-                float clampedY = targetY + Math.Clamp(yError, -maxYDeviation, maxYDeviation);
-                
-                // Directly set Y position (kinematic override) - this prevents displacement completely
-                _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, clampedY, currentPos.Z));
-                
-                // CRITICAL: Zero out ALL vertical velocity when correcting position
-                // This prevents collision forces from accumulating upward velocity
-                var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-                desiredVelocity = new Vector3(desiredVelocity.X, 0, desiredVelocity.Z);
-                _physicsWorld.SetEntityVelocity(entity, new Vector3(currentVelocity.X, 0, currentVelocity.Z));
+                Console.WriteLine($"[MovementController] Agent {entity.EntityId} at unexpected edge - stopping");
+                _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+                ReplanPath(entity, state, currentPosition);
+                return;
+            }
+            
+            // CRITICAL: Handle slope/ramp navigation properly
+            // We need to actively keep the agent at the correct Y position
+            // (heightDiff, horizontalDist, isOnSlope already calculated above for floor check)
+            
+            // Always move horizontally (XZ only)
+            var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
+            var finalVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
+            _physicsWorld.SetEntityVelocity(entity, finalVelocity);
+            
+            // CRITICAL FIX: Always apply grounding, not just on slopes!
+            // Even on flat terrain, gravity can cause sinking
+            Vector3 prevPos;
+            if (state.CurrentWaypointIndex > 0)
+            {
+                prevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
             }
             else
             {
-                // Position is within tolerance
-                var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-                
-                // CRITICAL: Aggressively clamp vertical velocity to prevent displacement
-                // When near other agents, allow ZERO vertical velocity (prevents collision push)
-                // Otherwise, allow minimal downward velocity for ground settling
-                float maxVerticalVelocity = nearOtherAgents ? 0.0f : 0.1f;
-                float clampedY = Math.Clamp(currentVelocity.Y, -0.5f, maxVerticalVelocity);
-                desiredVelocity = new Vector3(desiredVelocity.X, clampedY, desiredVelocity.Z);
+                // First waypoint - use agent's starting ground position
+                prevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
             }
             
-            _physicsWorld.SetEntityVelocity(entity, desiredVelocity);
+            // Calculate XZ progress from previous waypoint to target
+            float totalHorizontalDist = new Vector2(
+                targetWaypoint.X - prevPos.X,
+                targetWaypoint.Z - prevPos.Z
+            ).Length();
             
-            // Apply gentle grounding force to maintain stability
+            float coveredHorizontalDist = new Vector2(
+                currentPosition.X - prevPos.X,
+                currentPosition.Z - prevPos.Z
+            ).Length();
+            
+            float progress = totalHorizontalDist > 0.1f ? coveredHorizontalDist / totalHorizontalDist : 0.0f;
+            progress = Math.Clamp(progress, 0.0f, 1.0f);
+            
+            // Interpolate ground Y based on XZ progress
+            float interpolatedGroundY = prevPos.Y + (targetWaypoint.Y - prevPos.Y) * progress;
+            float targetY = interpolatedGroundY + agentHalfHeight;
+            
+            // ALWAYS apply grounding force to maintain correct Y position
             _characterController.ApplyGroundingForce(entity, desiredVelocity, targetY, agentHalfHeight);
         }
         else if (_characterController.IsRecovering(entity))
         {
-            // CRITICAL FIX: Gently correct Y position while recovering
-            // Apply upward impulse if agent is too low, don't teleport to avoid oscillation
-            var currentPos = _physicsWorld.GetEntityPosition(entity);
-            var currentVelocity = _physicsWorld.GetEntityVelocity(entity);
-            
-            // Use current waypoint Y if available, otherwise use target position Y
-            float waypointY = state.CurrentWaypointIndex < state.Waypoints.Count 
-                ? state.Waypoints[state.CurrentWaypointIndex].Y 
-                : state.TargetPosition.Y;
-            
-            float targetY = waypointY + agentHalfHeight;
-            float yError = currentPos.Y - targetY;
-            
-            // Only apply correction if agent has settled (low vertical velocity)
-            if (Math.Abs(currentVelocity.Y) < 0.1f && yError < -0.1f) // Sunk more than 10cm
+            // CRITICAL: Apply grounding even when recovering to prevent sinking
+            // Calculate target Y based on current waypoint
+            Vector3 recoverPrevPos;
+            if (state.CurrentWaypointIndex > 0)
             {
-                // Apply gentle upward correction force, don't teleport
-                float correctionForce = Math.Abs(yError) * 20.0f; // Proportional force
-                _physicsWorld.ApplyLinearImpulse(entity, new Vector3(0, correctionForce * 0.016f, 0));
+                recoverPrevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
+            }
+            else
+            {
+                recoverPrevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
             }
             
-            // Wait for stability before resuming pathfinding
+            if (state.CurrentWaypointIndex < state.Waypoints.Count)
+            {
+                var recoverTargetWaypoint = state.Waypoints[state.CurrentWaypointIndex];
+                
+                // Calculate XZ progress
+                float totalHorizontalDist = new Vector2(
+                    recoverTargetWaypoint.X - recoverPrevPos.X,
+                    recoverTargetWaypoint.Z - recoverPrevPos.Z
+                ).Length();
+                
+                float coveredHorizontalDist = new Vector2(
+                    currentPosition.X - recoverPrevPos.X,
+                    currentPosition.Z - recoverPrevPos.Z
+                ).Length();
+                
+                float progress = totalHorizontalDist > 0.1f ? coveredHorizontalDist / totalHorizontalDist : 0.0f;
+                progress = Math.Clamp(progress, 0.0f, 1.0f);
+                
+                // Interpolate ground Y
+                float interpolatedGroundY = recoverPrevPos.Y + (recoverTargetWaypoint.Y - recoverPrevPos.Y) * progress;
+                float targetY = interpolatedGroundY + agentHalfHeight;
+                
+                // Apply grounding to prevent further sinking while recovering
+                _characterController.ApplyGroundingForce(entity, Vector3.Zero, targetY, agentHalfHeight);
+            }
+            
+            // Wait for stability after landing
             if (_characterController.IsStable(entity))
             {
-                // Final position check and correction before resuming
-                currentPos = _physicsWorld.GetEntityPosition(entity);
-                yError = currentPos.Y - targetY;
-                
-                if (Math.Abs(yError) > 0.2f) // Still significantly off after recovery
-                {
-                    // Direct teleport as last resort
-                    _physicsWorld.SetEntityPosition(entity, new Vector3(currentPos.X, targetY, currentPos.Z));
-                    _physicsWorld.SetEntityVelocity(entity, new Vector3(currentVelocity.X, 0, currentVelocity.Z));
-                }
-                
-                // Replan path from current position
+                // Replan from current position
                 ReplanPath(entity, state, currentPosition);
                 _characterController.SetGrounded(entity);
             }
-            // else: continue waiting for stability
+            // else: continue waiting, but with grounding applied
         }
         // else AIRBORNE - do nothing, let physics handle it completely!
     }
@@ -500,6 +700,11 @@ public class MovementController
     /// </summary>
     private void ValidateAndReplanIfNeeded(PhysicsEntity entity, MovementState state, Vector3 currentPosition)
     {
+        // TODO: Implement dynamic path validation (check for obstacles, blocked paths, etc.)
+        // For now, this is a placeholder that doesn't do validation
+        // The PathSegmentValidator handles static validation at path creation time
+        
+        /* 
         var validationResult = _pathValidator.ValidatePath(
             state.Waypoints, 
             state.CurrentWaypointIndex, 
@@ -534,6 +739,7 @@ public class MovementController
                 ReplanPath(entity, state, currentPosition);
             }
         }
+        */
     }
     
     /// <summary>
@@ -543,8 +749,13 @@ public class MovementController
     {
         Console.WriteLine($"[MovementController] Replanning path for entity {entity.EntityId}");
         
-        var extents = new Vector3(5.0f, 10.0f, 5.0f);
-        var pathResult = _pathfinder.FindPath(currentPosition, state.TargetPosition, extents);
+        var extents = new Vector3(
+            _config.PathfindingSearchExtentsHorizontal,
+            _config.PathfindingSearchExtentsVertical,
+            _config.PathfindingSearchExtentsHorizontal
+        );
+        // Use PathfindingService for validation + auto-fix during replanning too
+        var pathResult = _pathfindingService.FindPath(currentPosition, state.TargetPosition, extents);
         
         if (pathResult.Success)
         {
@@ -583,11 +794,61 @@ public class MovementController
     }
     
     /// <summary>
+    /// Checks if agent is on the correct floor level for current waypoint.
+    /// Allows physics variance (±tolerance), but detects wrong floor entirely.
+    /// Used to distinguish between natural physics settling vs falling through floor.
+    /// </summary>
+    private bool IsOnCorrectFloor(Vector3 currentPos, Vector3 targetWaypoint, float agentHalfHeight, float tolerance = 3.0f)
+    {
+        float currentGroundY = currentPos.Y - agentHalfHeight;
+        float targetGroundY = targetWaypoint.Y;
+        float floorDifference = Math.Abs(currentGroundY - targetGroundY);
+        
+        // Within tolerance = same floor (accounts for slopes, physics variance)
+        // Beyond tolerance = wrong floor (fell through or on different level)
+        return floorDifference <= tolerance;
+    }
+    
+    /// <summary>
+    /// Checks if moving in a direction would cause agent to fall off an edge.
+    /// Uses navmesh query to check if ground exists ahead.
+    /// </summary>
+    private bool WouldFallOffEdge(PhysicsEntity entity, Vector3 currentPos, Vector3 desiredVelocity, float agentRadius)
+    {
+        if (desiredVelocity.Length() < 0.01f)
+            return false;
+        
+        // Check position slightly ahead in movement direction
+        Vector3 checkPos = currentPos + Vector3.Normalize(desiredVelocity) * (agentRadius * _config.EdgeCheckDistanceMultiplier);
+        
+        // CRITICAL FIX: Use much larger horizontal search extents to reliably find navmesh ahead
+        // Agent radius (0.5m) is too small for sparse navmesh polygons or moving between edges
+        // Query navmesh at check position
+        var searchExtents = new Vector3(
+            3.0f, // Increased from agentRadius to 3.0m
+            5.0f, // Search down 5m to find ground
+            3.0f  // Increased from agentRadius to 3.0m
+        );
+        
+        var groundAhead = _pathfindingService.FindNearestValidPosition(checkPos, searchExtents);
+        
+        if (groundAhead == null)
+            return true; // No ground ahead - would fall!
+        
+        // Check if ground ahead is significantly lower (cliff/drop)
+        float dropDistance = currentPos.Y - groundAhead.Value.Y;
+        return dropDistance > _config.MaxSafeDropDistance;
+    }
+    
+    /// <summary>
     /// Calculates desired velocity toward a target.
+    /// Always returns horizontal (XZ) velocity - Y is handled by physics.
     /// </summary>
     private Vector3 CalculateDesiredVelocity(Vector3 currentPos, Vector3 targetPos, float maxSpeed)
     {
-        // For ground-based movement, only move in XZ plane
+        // ALWAYS use horizontal movement (XZ plane only)
+        // This ensures agent follows navmesh path precisely
+        // Y positioning is handled by physics naturally
         var targetXZ = new Vector3(targetPos.X, currentPos.Y, targetPos.Z);
         var direction = targetXZ - currentPos;
         var distance = direction.Length();

@@ -33,6 +33,170 @@ class Program
     }
     
     /// <summary>
+    /// Quick pathfinding test - just finds a path and prints the result, no simulation.
+    /// </summary>
+    static void TestQuickPathfinding(Vector3 start, Vector3 goal)
+    {
+        Console.WriteLine($"Testing path from ({start.X}, {start.Y}, {start.Z}) to ({goal.X}, {goal.Y}, {goal.Z})\n");
+        
+        try
+        {
+            // Step 1: Create physics world
+            Console.WriteLine("1. Setting up physics world...");
+            var config = new PhysicsConfiguration
+            {
+                Gravity = new Vector3(0, -9.81f, 0),
+                Timestep = 0.016f
+            };
+            var physicsWorld = new PhysicsWorld(config);
+            Console.WriteLine("   ✓ Done\n");
+            
+            // Step 2: Load world geometry
+            Console.WriteLine("2. Loading world geometry...");
+            string meshPath = ResolvePath("worlds/seperated_land.obj");
+            
+            if (!File.Exists(meshPath))
+            {
+                Console.WriteLine($"   ✗ Mesh file not found: {meshPath}");
+                Console.WriteLine("   Please ensure seperated_land.obj exists in the worlds folder.");
+                physicsWorld.Dispose();
+                return;
+            }
+            
+            var meshLoader = new MeshLoader();
+            var worldBuilder = new WorldBuilder(physicsWorld, meshLoader);
+            
+            string? metadataPath = meshPath + ".json";
+            if (!File.Exists(metadataPath)) metadataPath = null;
+            
+            var worldData = worldBuilder.LoadAndBuildWorld(meshPath, metadataPath);
+            
+            int totalVerts = worldData.Meshes.Sum(m => m.Vertices.Count);
+            int totalTris = worldData.Meshes.Sum(m => m.TriangleCount);
+            
+            Console.WriteLine($"   ✓ Loaded '{worldData.Name}'");
+            Console.WriteLine($"   ✓ {worldData.Meshes.Count} meshes, {totalVerts:N0} vertices, {totalTris:N0} triangles\n");
+            
+            // Step 3: Build NavMesh
+            Console.WriteLine("3. Building navigation mesh...");
+            var agentConfig = new AgentConfig
+            {
+                Height = 2.0f,
+                Radius = 0.4f,
+                MaxSlope = 45.0f,
+                MaxClimb = 0.5f
+            };
+            
+            var navMeshGenerator = new NavMeshGenerator();
+            var navMeshBuilder = new NavMeshBuilder(physicsWorld, navMeshGenerator);
+            
+            var navMeshData = navMeshBuilder.BuildNavMeshDirect(agentConfig);
+            
+            if (navMeshData == null || navMeshData.NavMesh == null)
+            {
+                Console.WriteLine("   ✗ NavMesh generation failed");
+                physicsWorld.Dispose();
+                return;
+            }
+            
+            var tile = navMeshData.NavMesh.GetTile(0);
+            int vertCount = tile?.data?.header.vertCount ?? 0;
+            int triCount = tile?.data?.polys.Sum(p => p.vertCount - 2) ?? 0;
+            
+            Console.WriteLine($"   ✓ NavMesh generated");
+            Console.WriteLine($"   ✓ {vertCount:N0} vertices, {triCount:N0} triangles\n");
+            
+            // Step 4: Find path
+            Console.WriteLine("4. Finding path...");
+            var pathfinder = new Pathfinder(navMeshData);
+            
+            var pathfindingConfig = new PathfindingConfiguration();
+            var extents = new Vector3(
+                pathfindingConfig.PathfindingSearchExtentsHorizontal,
+                pathfindingConfig.PathfindingSearchExtentsVertical,
+                pathfindingConfig.PathfindingSearchExtentsHorizontal
+            );
+            
+            var pathResult = pathfinder.FindPath(start, goal, extents);
+            
+            Console.WriteLine();
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            Console.WriteLine("PATHFINDING RESULT");
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            Console.WriteLine();
+            
+            if (pathResult.Success && pathResult.Waypoints.Count > 0)
+            {
+                Console.WriteLine("✓ PATH FOUND");
+                Console.WriteLine();
+                Console.WriteLine($"Start:     ({start.X}, {start.Y}, {start.Z})");
+                Console.WriteLine($"Goal:      ({goal.X}, {goal.Y}, {goal.Z})");
+                Console.WriteLine($"Waypoints: {pathResult.Waypoints.Count}");
+                Console.WriteLine();
+                
+                // Calculate path length
+                float pathLength = 0;
+                for (int i = 1; i < pathResult.Waypoints.Count; i++)
+                {
+                    pathLength += Vector3.Distance(pathResult.Waypoints[i - 1], pathResult.Waypoints[i]);
+                }
+                
+                float directDistance = Vector3.Distance(start, goal);
+                Console.WriteLine($"Direct distance:  {directDistance:F2}m");
+                Console.WriteLine($"Path length:      {pathLength:F2}m");
+                Console.WriteLine($"Path efficiency:  {(directDistance / pathLength * 100):F1}%");
+                Console.WriteLine();
+                
+                Console.WriteLine("Waypoints:");
+                Console.WriteLine("─────────────────────────────────────────────────────────────");
+                for (int i = 0; i < pathResult.Waypoints.Count; i++)
+                {
+                    var wp = pathResult.Waypoints[i];
+                    string label = i == 0 ? " (start)" : i == pathResult.Waypoints.Count - 1 ? " (goal)" : "";
+                    Console.WriteLine($"  [{i,2}] ({wp.X,7:F2}, {wp.Y,7:F2}, {wp.Z,7:F2}){label}");
+                    
+                    // Show segment distance
+                    if (i > 0)
+                    {
+                        float segmentDist = Vector3.Distance(pathResult.Waypoints[i - 1], wp);
+                        Console.WriteLine($"       └─ {segmentDist:F2}m from previous waypoint");
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("✗ NO PATH FOUND");
+                Console.WriteLine();
+                Console.WriteLine("Possible reasons:");
+                Console.WriteLine("  • Start or goal position is not on the navmesh");
+                Console.WriteLine("  • Goal is unreachable from start (terrain blocks the path)");
+                Console.WriteLine("  • Positions are outside the navmesh bounds");
+                Console.WriteLine();
+                Console.WriteLine("Try using positions closer to known walkable areas.");
+            }
+            
+            Console.WriteLine();
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            
+            // Cleanup
+            physicsWorld.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            Console.WriteLine("ERROR");
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            Console.WriteLine($"Type:    {ex.GetType().Name}");
+            Console.WriteLine($"Message: {ex.Message}");
+            Console.WriteLine();
+            Console.WriteLine("Stack trace:");
+            Console.WriteLine(ex.StackTrace);
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+        }
+    }
+    
+    /// <summary>
     /// Parses command-line arguments for export options.
     /// </summary>
     static void ParseArguments(string[] args)
@@ -354,6 +518,25 @@ class Program
                 
                 TestEnhancedShowcase.Run(vizServer, meshPath, agentCount);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "phase1")
+            {
+                // Run Phase 1 diagnostic test for Agent-3 falling issue
+                Console.WriteLine("[Info] Running PHASE 1 DIAGNOSTIC TEST\n");
+                Console.WriteLine("[Info] This diagnostic test analyzes:\n");
+                Console.WriteLine("[Info]   - Mesh interpretation differences (BepuPhysics vs DotRecast)");
+                Console.WriteLine("[Info]   - Ground contact details (normals, penetration, timing)");
+                Console.WriteLine("[Info]   - Grounding force effectiveness vs gravity");
+                Console.WriteLine("[Info]   - Agent-3 specific path analysis\n");
+                Console.WriteLine("[Info] Goal: Understand WHY Agent-3 falls, not just observe it\n");
+                
+                string? meshPath = null;
+                if (args.Length > 1)
+                {
+                    meshPath = args[1];
+                }
+                
+                TestPhase1Diagnostics.Run(vizServer, meshPath);
+            }
             else if (args.Length > 0 && args[0].ToLower() == "collision")
             {
                 // Run mesh collision system tests
@@ -401,6 +584,97 @@ class Program
                 
                 TestLocalAvoidance.Run(vizServer);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "motor-vs-velocity")
+            {
+                // Run motor vs velocity character controller comparison
+                Console.WriteLine("[Info] Running MOTOR VS VELOCITY COMPARISON TEST\n");
+                Console.WriteLine("[Info] This compares:\n");
+                Console.WriteLine("[Info]   - Velocity-based character controller (current)");
+                Console.WriteLine("[Info]   - Motor-based character controller (BepuPhysics v2 approach)");
+                Console.WriteLine("[Info]   - Agent-3 multi-level climb scenario (10m vertical climb)");
+                Console.WriteLine("[Info]   - Physics stability (bouncing, launching, falling)");
+                Console.WriteLine("[Info]   - Success rate and distance metrics\n");
+                
+                // Parse test mode from arguments
+                var testMode = TestMotorVsVelocity.TestMode.Both;
+                string? meshPath = null;
+                
+                for (int i = 1; i < args.Length; i++)
+                {
+                    var arg = args[i].ToLower();
+                    if (arg == "--velocity" || arg == "-v")
+                    {
+                        testMode = TestMotorVsVelocity.TestMode.VelocityOnly;
+                        Console.WriteLine("[Info] Mode: Velocity-based controller ONLY\n");
+                    }
+                    else if (arg == "--motor" || arg == "-m")
+                    {
+                        testMode = TestMotorVsVelocity.TestMode.MotorOnly;
+                        Console.WriteLine("[Info] Mode: Motor-based controller ONLY\n");
+                    }
+                    else if (!arg.StartsWith("--") && !arg.StartsWith("-"))
+                    {
+                        // Assume it's a mesh path
+                        meshPath = args[i];
+                    }
+                }
+                
+                if (testMode == TestMotorVsVelocity.TestMode.Both)
+                {
+                    Console.WriteLine("[Info] Mode: Running BOTH controllers for comparison\n");
+                    Console.WriteLine("[Info] Tip: Use --velocity or --motor flags to run only one\n");
+                }
+                
+                TestMotorVsVelocity.Run(vizServer, meshPath, testMode);
+            }
+            else if (args.Length > 0 && args[0].ToLower() == "pathfind")
+            {
+                // Quick pathfinding test - no simulation
+                Console.WriteLine("[Info] Running QUICK PATHFINDING TEST\n");
+                
+                // Parse arguments: pathfind <startX> <startY> <startZ> <goalX> <goalY> <goalZ>
+                Vector3 start, goal;
+                if (args.Length >= 7)
+                {
+                    // Custom coordinates provided
+                    start = new Vector3(float.Parse(args[1]), float.Parse(args[2]), float.Parse(args[3]));
+                    goal = new Vector3(float.Parse(args[4]), float.Parse(args[5]), float.Parse(args[6]));
+                }
+                else
+                {
+                    // Default coordinates (Agent-3 from showcase)
+                    start = new Vector3(51.89f, 0.29f, 10.19f);
+                    goal = new Vector3(45.33f, 8f, 18.96f);
+                }
+                
+                TestQuickPathfinding(start, goal);
+            }
+            else if (args.Length > 0 && args[0].ToLower() == "path-validation")
+            {
+                // Path validation test - validates that PathValidator catches Agent-3 issue
+                Console.WriteLine("[Info] Running PATH VALIDATION TEST\n");
+                Console.WriteLine("[Info] This test validates that PathValidator correctly identifies\n");
+                Console.WriteLine("[Info] physically untraversable paths that DotRecast accepts.\n");
+                
+                string? meshPath = null;
+                if (args.Length > 1)
+                {
+                    meshPath = args[1];
+                }
+                
+                TestPathValidation.Run(meshPath);
+            }
+            else if (args.Length > 0 && args[0].ToLower() == "navmesh-validity")
+            {
+                // NavMesh waypoint validity test - verifies waypoints vs segments
+                Console.WriteLine("[Info] Running NAVMESH WAYPOINT VALIDITY TEST\n");
+                Console.WriteLine("[Info] This test definitively answers:\n");
+                Console.WriteLine("[Info]   1. Are the waypoints valid navmesh points?\n");
+                Console.WriteLine("[Info]   2. Are the segments between waypoints traversable?\n");
+                Console.WriteLine("[Info] This will clarify if the issue is navmesh generation or segment validation.\n");
+                
+                TestNavMeshWaypointValidity.Run();
+            }
             else
             {
                 // Run all tests with visualization
@@ -413,6 +687,14 @@ class Program
                 Console.WriteLine("[Info]   Use 'dotnet run -- physics-pathfinding' to test physics-pathfinding integration");
                 Console.WriteLine("[Info]   Use 'dotnet run -- agent-collision' to test agent blocking and push mechanics");
                 Console.WriteLine("[Info]   Use 'dotnet run -- local-avoidance' to test local avoidance with crossing agents");
+                Console.WriteLine("[Info]   Use 'dotnet run -- motor-vs-velocity' to compare both character controllers (Agent-3 climb)");
+                Console.WriteLine("[Info]   Use 'dotnet run -- motor-vs-velocity --velocity' to test velocity controller only");
+                Console.WriteLine("[Info]   Use 'dotnet run -- motor-vs-velocity --motor' to test motor controller only");
+                Console.WriteLine("[Info]   Use 'dotnet run -- pathfind' to quickly test pathfinding without simulation");
+                Console.WriteLine("[Info]   Use 'dotnet run -- pathfind <x1> <y1> <z1> <x2> <y2> <z2>' for custom coordinates");
+                Console.WriteLine("[Info]   Use 'dotnet run -- path-validation [meshPath]' to test path validation system");
+                Console.WriteLine("[Info]   Use 'dotnet run -- navmesh-validity' to verify waypoint validity vs segment traversability");
+                Console.WriteLine("[Info]   Use 'dotnet run -- phase1 [meshPath]' for diagnostic analysis of Agent-3 falling issue");
                 Console.WriteLine("[Info]   Use '--export-navmesh [path]' to export generated NavMesh to OBJ file\n");
                 TestPhysicsCollision(vizServer);
                 Console.WriteLine("\n" + new string('=', 60) + "\n");
@@ -587,7 +869,7 @@ class Program
             var pathfinder = new Pathfinder(navMeshData);
             var start = new Vector3(-5, 1, 0);  // Start on left side
             var goal = new Vector3(6, 1, 0);    // Goal on right side, behind the wall at (3, 1.5, 0)
-            var extents = new Vector3(5.0f, 10.0f, 5.0f); // Search extents
+            var extents = new Vector3(5.0f, 10.0f, 5.0f); // Production search extents
             
             var pathResult = pathfinder.FindPath(start, goal, extents);
             
@@ -629,15 +911,15 @@ class Program
                 isStatic: false
             );
             
-            var movementController = new MovementController(physicsWorld, pathfinder);
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
             
             // Request movement to goal
             var moveRequest = new MovementRequest(1, goal, maxSpeed: 3.0f);
-            bool moveStarted = movementController.RequestMovement(moveRequest);
+            var movementResponse = movementController.RequestMovement(moveRequest);
             
-            if (!moveStarted)
+            if (!movementResponse.Success)
             {
-                Console.WriteLine($"   ✗ Failed to start movement\n");
+                Console.WriteLine($"   ✗ Failed to start movement: {movementResponse.Message}\n");
                 physicsWorld.Dispose();
                 return;
             }
@@ -868,7 +1150,7 @@ class Program
             var pathfinder = new Pathfinder(navMeshData);
             var start = new Vector3(-5, 1, 0);
             var goal = new Vector3(5, 1, 0);
-            var extents = new Vector3(5.0f, 10.0f, 5.0f);
+            var extents = new Vector3(5.0f, 10.0f, 5.0f); // Production search extents
             
             var pathResult = pathfinder.FindPath(start, goal, extents);
             
@@ -902,11 +1184,18 @@ class Program
                     isStatic: false
                 );
                 
-                var movementController = new MovementController(physicsWorld, pathfinder);
+                var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
                 var moveRequest = new MovementRequest(1, goal, maxSpeed: 3.0f);
-                movementController.RequestMovement(moveRequest);
+                var movementResponse = movementController.RequestMovement(moveRequest);
                 
-                Console.WriteLine("   ✓ Agent created and movement started\n");
+                if (movementResponse.Success)
+                {
+                    Console.WriteLine("   ✓ Agent created and movement started\n");
+                }
+                else
+                {
+                    Console.WriteLine($"   ✗ Failed to start movement: {movementResponse.Message}\n");
+                }
                 
                 // Simulate for a bit
                 Console.WriteLine("8. Simulating (180 steps, ~3 seconds)...");
@@ -1073,7 +1362,7 @@ class Program
                 // Try to find a path
                 Console.WriteLine($"6. Testing pathfinding to ({goalPos.X:F2}, {goalPos.Y:F2}, {goalPos.Z:F2})...");
                 var pathfinder = new Pathfinder(navMeshData);
-                var extents = new Vector3(10.0f, 10.0f, 10.0f);
+                var extents = new Vector3(5.0f, 10.0f, 5.0f); // Production search extents
                 var pathResult = pathfinder.FindPath(spawnPos, goalPos, extents);
                 
                 if (pathResult.Success && pathResult.Waypoints.Count > 0)
@@ -1081,13 +1370,15 @@ class Program
                     Console.WriteLine($"   ✓ Path found with {pathResult.Waypoints.Count} waypoints\n");
                     
                     // Create movement controller and move agent
-                    var movementController = new MovementController(physicsWorld, pathfinder);
+                    var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
                     var moveRequest = new MovementRequest(1, goalPos, maxSpeed: 3.0f);
-                    movementController.RequestMovement(moveRequest);
+                    var movementResponse = movementController.RequestMovement(moveRequest);
                     
-                    // Simulate movement
-                    Console.WriteLine("7. Simulating agent movement (300 steps, ~5 seconds)...");
-                    for (int i = 0; i < 300; i++)
+                    if (movementResponse.Success)
+                    {
+                        // Simulate movement
+                        Console.WriteLine("7. Simulating agent movement (300 steps, ~5 seconds)...");
+                        for (int i = 0; i < 300; i++)
                     {
                         movementController.UpdateMovement(0.016f);
                         physicsWorld.Update(0.016f);
@@ -1110,9 +1401,14 @@ class Program
                         Thread.Sleep(16);
                     }
                     
-                    var finalPos = physicsWorld.GetEntityPosition(agent);
-                    var finalDist = Vector3.Distance(finalPos, goalPos);
-                    Console.WriteLine($"\n   Final distance to goal: {finalDist:F2}");
+                        var finalPos = physicsWorld.GetEntityPosition(agent);
+                        var finalDist = Vector3.Distance(finalPos, goalPos);
+                        Console.WriteLine($"\n   Final distance to goal: {finalDist:F2}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"   ✗ Failed to start movement: {movementResponse.Message}");
+                    }
                 }
                 else
                 {
@@ -1263,7 +1559,7 @@ class Program
             
             // Step 4: Create pathfinder
             var pathfinder = new Pathfinder(navMeshData);
-            var movementController = new MovementController(physicsWorld, pathfinder);
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
             
             // Step 5: Create multiple agents with different goals
             Console.WriteLine("4. Creating multiple agents with different navigation goals...");
@@ -1300,7 +1596,7 @@ class Program
                 );
                 
                 // Find path for this agent
-                var extents = new Vector3(10.0f, 10.0f, 10.0f);
+                var extents = new Vector3(5.0f, 10.0f, 5.0f); // Production search extents
                 var pathResult = pathfinder.FindPath(start, goal, extents);
                 
                 if (pathResult.Success && pathResult.Waypoints.Count > 0)
@@ -1309,10 +1605,17 @@ class Program
                     
                     // Request movement
                     var moveRequest = new MovementRequest(entityId, goal, maxSpeed: 3.0f);
-                    movementController.RequestMovement(moveRequest);
+                    var movementResponse = movementController.RequestMovement(moveRequest);
                     
-                    agentEntities.Add(agent);
-                    agentPaths.Add(pathResult);
+                    if (movementResponse.Success)
+                    {
+                        agentEntities.Add(agent);
+                        agentPaths.Add(pathResult);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"   ✗ Failed to start movement for {name}: {movementResponse.Message}");
+                    }
                 }
                 else
                 {

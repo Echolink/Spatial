@@ -11,7 +11,7 @@ namespace Spatial.Integration;
 /// This enables Minecraft-style behavior: agents can follow paths while also
 /// responding to gravity, knockback, falling, and collisions.
 /// </summary>
-public class CharacterController
+public class CharacterController : ICharacterController
 {
     private readonly PhysicsWorld _physicsWorld;
     private readonly CharacterControllerConfig _config;
@@ -142,53 +142,105 @@ public class CharacterController
     }
     
     /// <summary>
-    /// Applies grounding force to keep agent stable on ground.
-    /// Call this when agent is GROUNDED and following a path.
+    /// Applies grounding force to keep agent at target Y position.
+    /// Used for slope navigation to keep agent pressed against terrain.
+    /// 
+    /// CRITICAL FIX: Uses direct position correction with aggressive clamping.
+    /// Always forces agent to exact target Y to prevent any sinking.
+    /// Works in ALL states (GROUNDED, RECOVERING) to prevent fall-through.
     /// </summary>
     /// <param name="entity">Entity to apply grounding to</param>
-    /// <param name="moveDirection">Current movement direction</param>
+    /// <param name="moveDirection">Current movement direction (unused but kept for API compat)</param>
     /// <param name="targetY">Target Y position (navmesh surface + half-height)</param>
     /// <param name="agentHalfHeight">Half-height of agent capsule (length/2 + radius)</param>
     public void ApplyGroundingForce(PhysicsEntity entity, Vector3 moveDirection, float targetY, float agentHalfHeight)
     {
-        if (!IsGrounded(entity))
-            return;
+        // CRITICAL: Do NOT early return for non-grounded states!
+        // We need to apply grounding even when recovering to prevent further sinking
+        var state = GetState(entity);
+        if (state == CharacterState.AIRBORNE)
+            return; // Only skip if truly airborne (no ground contact)
         
         var currentPos = _physicsWorld.GetEntityPosition(entity);
         var velocity = _physicsWorld.GetEntityVelocity(entity);
         
-        // FIXED: Actively correct Y position to prevent sinking into ground
-        // Calculate Y error (how far from expected position)
+        // Calculate Y error (how far from target position)
         float yError = targetY - currentPos.Y;
         
-        // If agent has sunk significantly (more than tolerance), apply corrective upward force
-        if (yError > 0.05f) // More than 5cm below expected
+        // DIAGNOSTIC LOGGING: Track grounding effectiveness for Agent-3
+        if (GroundingDiagnostics.IsEnabled && entity.EntityId == GroundingDiagnostics.TrackedEntityId)
         {
-            // Apply strong upward impulse to correct position
-            float correctionForce = yError * _config.GroundingForce * 2.0f; // Proportional to error
-            var upwardImpulse = new Vector3(0, correctionForce * 0.016f, 0);
-            _physicsWorld.ApplyLinearImpulse(entity, upwardImpulse);
-        }
-        else if (yError < -0.05f) // More than 5cm above expected
-        {
-            // Apply gentle downward force to settle
-            var downwardImpulse = new Vector3(0, yError * _config.GroundingForce * 0.5f * 0.016f, 0);
-            _physicsWorld.ApplyLinearImpulse(entity, downwardImpulse);
-        }
-        
-        // CRITICAL: Cancel ANY upward velocity when grounded to prevent collision displacement
-        // This prevents agents from being launched upward during agent-agent collisions
-        if (velocity.Y > 0.01f) // Any upward motion > 1cm/s
-        {
-            var clampedVelocity = new Vector3(velocity.X, 0, velocity.Z);
-            _physicsWorld.SetEntityVelocity(entity, clampedVelocity);
+            GroundingDiagnostics.LogGroundingAttempt(new GroundingInfo
+            {
+                EntityId = entity.EntityId,
+                CurrentY = currentPos.Y,
+                TargetY = targetY,
+                YError = yError,
+                YVelocity = velocity.Y,
+                State = state,
+                WasCorrected = Math.Abs(yError) > 0.01f,
+                Timestamp = DateTime.UtcNow
+            });
         }
         
-        // Also clamp excessive downward velocity
-        else if (velocity.Y < -0.5f)
+        // AGGRESSIVE FIX: Always snap to exact Y position every frame
+        // This prevents ANY sinking from gravity between frames
+        if (Math.Abs(yError) > 0.01f) // More than 1cm off - correct immediately
         {
-            var clampedVelocity = new Vector3(velocity.X, -0.5f, velocity.Z);
-            _physicsWorld.SetEntityVelocity(entity, clampedVelocity);
+            // Directly set Y position to target (keep X and Z unchanged)
+            var correctedPosition = new Vector3(currentPos.X, targetY, currentPos.Z);
+            _physicsWorld.SetEntityPosition(entity, correctedPosition);
+            
+            // CRITICAL: Zero out Y velocity completely
+            // This prevents gravity from accumulating downward velocity
+            _physicsWorld.SetEntityVelocity(entity, new Vector3(velocity.X, 0, velocity.Z));
+        }
+        else
+        {
+            // Even if position is correct, zero Y velocity to prevent future sinking
+            if (Math.Abs(velocity.Y) > 0.01f)
+            {
+                _physicsWorld.SetEntityVelocity(entity, new Vector3(velocity.X, 0, velocity.Z));
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Applies idle grounding to keep stationary agent at current Y position.
+    /// Prevents sinking through ground when not actively moving.
+    /// Should be called every frame for agents without active movement.
+    /// </summary>
+    /// <param name="entity">Entity to apply idle grounding to</param>
+    public void ApplyIdleGrounding(PhysicsEntity entity)
+    {
+        var state = GetState(entity);
+        if (state == CharacterState.AIRBORNE)
+            return; // Don't interfere with falling agents
+        
+        var currentPos = _physicsWorld.GetEntityPosition(entity);
+        var velocity = _physicsWorld.GetEntityVelocity(entity);
+        
+        // Keep agent at current Y by zeroing vertical velocity and preventing any Y drift
+        if (Math.Abs(velocity.Y) > 0.01f)
+        {
+            // Zero Y velocity to prevent sinking
+            _physicsWorld.SetEntityVelocity(entity, new Vector3(velocity.X, 0, velocity.Z));
+            
+            // DIAGNOSTIC LOGGING: Track idle grounding for Agent-3
+            if (GroundingDiagnostics.IsEnabled && entity.EntityId == GroundingDiagnostics.TrackedEntityId)
+            {
+                GroundingDiagnostics.LogGroundingAttempt(new GroundingInfo
+                {
+                    EntityId = entity.EntityId,
+                    CurrentY = currentPos.Y,
+                    TargetY = currentPos.Y,
+                    YError = 0,
+                    YVelocity = velocity.Y,
+                    State = state,
+                    WasCorrected = true,
+                    Timestamp = DateTime.UtcNow
+                });
+            }
         }
     }
     
@@ -252,14 +304,18 @@ public class CharacterController
     /// <summary>
     /// Checks if agent has deviated too far from navmesh vertically.
     /// Used to detect falling through or getting stuck.
+    /// DEPRECATED: Use MovementController.IsOnCorrectFloor instead.
     /// </summary>
+    [Obsolete("Use MovementController.IsOnCorrectFloor with PathfindingConfiguration.FloorLevelTolerance instead")]
     public bool HasDeviatedFromNavmesh(PhysicsEntity entity, float navmeshY, float agentHalfHeight)
     {
         var position = _physicsWorld.GetEntityPosition(entity);
         float expectedY = navmeshY + agentHalfHeight;
         float yDelta = Math.Abs(position.Y - expectedY);
         
+        #pragma warning disable CS0618 // Type or member is obsolete
         return yDelta > _config.MaxNavmeshDeviation;
+        #pragma warning restore CS0618 // Type or member is obsolete
     }
     
     /// <summary>
@@ -271,4 +327,159 @@ public class CharacterController
         _groundContacts.Remove(entityId);
         _recoveryTimers.Remove(entityId);
     }
+}
+
+/// <summary>
+/// Diagnostic utility for tracking grounding force effectiveness.
+/// Enable this to measure how well grounding corrections work vs gravity.
+/// </summary>
+public static class GroundingDiagnostics
+{
+    private static readonly List<GroundingInfo> _groundingHistory = new();
+    private static readonly object _lock = new object();
+    private static int _maxHistorySize = 10000;
+    
+    /// <summary>
+    /// Enable/disable grounding diagnostics.
+    /// </summary>
+    public static bool IsEnabled { get; set; } = false;
+    
+    /// <summary>
+    /// Entity ID to track (e.g., 103 for Agent-3).
+    /// </summary>
+    public static int TrackedEntityId { get; set; } = -1;
+    
+    /// <summary>
+    /// Logs a grounding attempt.
+    /// </summary>
+    public static void LogGroundingAttempt(GroundingInfo info)
+    {
+        lock (_lock)
+        {
+            _groundingHistory.Add(info);
+            
+            // Trim history if it gets too large
+            if (_groundingHistory.Count > _maxHistorySize)
+            {
+                _groundingHistory.RemoveRange(0, _groundingHistory.Count - _maxHistorySize);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Gets all recorded grounding attempts.
+    /// </summary>
+    public static List<GroundingInfo> GetGroundingHistory()
+    {
+        lock (_lock)
+        {
+            return new List<GroundingInfo>(_groundingHistory);
+        }
+    }
+    
+    /// <summary>
+    /// Clears grounding history.
+    /// </summary>
+    public static void Clear()
+    {
+        lock (_lock)
+        {
+            _groundingHistory.Clear();
+        }
+    }
+    
+    /// <summary>
+    /// Prints a summary of grounding effectiveness.
+    /// </summary>
+    public static void PrintSummary()
+    {
+        lock (_lock)
+        {
+            if (_groundingHistory.Count == 0)
+            {
+                Console.WriteLine("[GroundingDiagnostics] No grounding attempts recorded.");
+                return;
+            }
+            
+            Console.WriteLine();
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            Console.WriteLine($"║ GROUNDING DIAGNOSTICS SUMMARY (Entity {TrackedEntityId})       ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
+            Console.WriteLine($"Total Grounding Attempts: {_groundingHistory.Count}");
+            Console.WriteLine($"Time Range: {_groundingHistory.First().Timestamp:HH:mm:ss.fff} to {_groundingHistory.Last().Timestamp:HH:mm:ss.fff}");
+            Console.WriteLine();
+            
+            // Analyze corrections
+            var corrected = _groundingHistory.Where(g => g.WasCorrected).ToList();
+            var noCorrectionNeeded = _groundingHistory.Where(g => !g.WasCorrected).ToList();
+            
+            Console.WriteLine($"Position Corrections Made: {corrected.Count} ({100.0 * corrected.Count / _groundingHistory.Count:F1}%)");
+            Console.WriteLine($"No Correction Needed: {noCorrectionNeeded.Count} ({100.0 * noCorrectionNeeded.Count / _groundingHistory.Count:F1}%)");
+            Console.WriteLine();
+            
+            if (corrected.Any())
+            {
+                Console.WriteLine("Correction Statistics:");
+                Console.WriteLine($"  Average Y Error: {corrected.Average(g => Math.Abs(g.YError)):F4}m");
+                Console.WriteLine($"  Max Y Error: {corrected.Max(g => Math.Abs(g.YError)):F4}m");
+                Console.WriteLine($"  Average Y Velocity (before correction): {corrected.Average(g => g.YVelocity):F4}m/s");
+                Console.WriteLine($"  Min Y Velocity: {corrected.Min(g => g.YVelocity):F4}m/s");
+                
+                // Check if errors are increasing over time (sign of losing battle with gravity)
+                var firstHalf = corrected.Take(corrected.Count / 2).ToList();
+                var secondHalf = corrected.Skip(corrected.Count / 2).ToList();
+                
+                if (firstHalf.Any() && secondHalf.Any())
+                {
+                    var firstHalfAvgError = firstHalf.Average(g => Math.Abs(g.YError));
+                    var secondHalfAvgError = secondHalf.Average(g => Math.Abs(g.YError));
+                    var errorIncrease = secondHalfAvgError - firstHalfAvgError;
+                    
+                    Console.WriteLine();
+                    if (errorIncrease > 0.001f)
+                    {
+                        Console.WriteLine($"⚠️ Y Error Increasing Over Time:");
+                        Console.WriteLine($"   First half average: {firstHalfAvgError:F4}m");
+                        Console.WriteLine($"   Second half average: {secondHalfAvgError:F4}m");
+                        Console.WriteLine($"   Increase: +{errorIncrease:F4}m ({errorIncrease / firstHalfAvgError * 100:F1}%)");
+                        Console.WriteLine($"   ⚠️ This suggests grounding is losing the fight against gravity!");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"✅ Y Error Stable or Decreasing:");
+                        Console.WriteLine($"   First half average: {firstHalfAvgError:F4}m");
+                        Console.WriteLine($"   Second half average: {secondHalfAvgError:F4}m");
+                    }
+                }
+            }
+            
+            // Analyze by state
+            var byState = _groundingHistory.GroupBy(g => g.State).ToList();
+            Console.WriteLine();
+            Console.WriteLine("Grounding Attempts by State:");
+            foreach (var group in byState)
+            {
+                var correctionRate = group.Count(g => g.WasCorrected) / (float)group.Count() * 100;
+                Console.WriteLine($"  {group.Key}: {group.Count()} attempts ({correctionRate:F1}% required correction)");
+            }
+            
+            Console.WriteLine();
+        }
+    }
+}
+
+/// <summary>
+/// Detailed information about a grounding attempt.
+/// </summary>
+public struct GroundingInfo
+{
+    public int EntityId { get; set; }
+    public float CurrentY { get; set; }
+    public float TargetY { get; set; }
+    public float YError { get; set; }
+    public float YVelocity { get; set; }
+    public CharacterState State { get; set; }
+    public bool WasCorrected { get; set; }
+    public DateTime Timestamp { get; set; }
 }

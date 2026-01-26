@@ -34,13 +34,27 @@ public class MovementRequest
     /// </summary>
     public float AgentRadius { get; }
     
-    public MovementRequest(int entityId, Vector3 targetPosition, float maxSpeed = 5.0f, float agentHeight = 2.0f, float agentRadius = 0.4f)
+    /// <summary>
+    /// Optional search extents override for finding navmesh surfaces.
+    /// If null, uses default extents from PathfindingConfiguration.
+    /// X/Z: Horizontal search radius, Y: Vertical search range (above/below search point).
+    /// </summary>
+    public Vector3? SearchExtents { get; }
+    
+    public MovementRequest(
+        int entityId, 
+        Vector3 targetPosition, 
+        float maxSpeed = 5.0f, 
+        float agentHeight = 2.0f, 
+        float agentRadius = 0.4f,
+        Vector3? searchExtents = null)
     {
         EntityId = entityId;
         TargetPosition = targetPosition;
         MaxSpeed = maxSpeed;
         AgentHeight = agentHeight;
         AgentRadius = agentRadius;
+        SearchExtents = searchExtents;
     }
 }
 

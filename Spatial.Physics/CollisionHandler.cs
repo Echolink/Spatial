@@ -347,6 +347,23 @@ public struct CollisionHandler : INarrowPhaseCallbacks
             // Check if normal is pointing mostly upward (Y > 0.7 means ~45 degree slope or flatter)
             bool isGroundContact = normal.Y > 0.7f;
             
+            // DIAGNOSTIC LOGGING: Log detailed contact information for Agent-3
+            if (ContactDiagnostics.IsEnabled && dynamicEntity.EntityId == ContactDiagnostics.TrackedEntityId)
+            {
+                var normalAngleDegrees = MathF.Acos(normal.Y) * (180.0f / MathF.PI);
+                ContactDiagnostics.LogContact(new ContactInfo
+                {
+                    DynamicEntityId = dynamicEntity.EntityId,
+                    GroundEntityId = groundEntity.EntityId,
+                    ContactNormal = normal,
+                    PenetrationDepth = depth,
+                    ContactOffset = offset,
+                    NormalAngleDegrees = normalAngleDegrees,
+                    IsGroundContact = isGroundContact,
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+            
             if (isGroundContact && _groundContactCallbacks?.OnGroundContact != null)
             {
                 _groundContactCallbacks.OnGroundContact(dynamicEntity, groundEntity);
@@ -436,4 +453,153 @@ public class GroundContactCallbacks
 {
     public Action<PhysicsEntity, PhysicsEntity>? OnGroundContact { get; set; }
     public Action<PhysicsEntity, PhysicsEntity>? OnGroundContactRemoved { get; set; }
+}
+
+/// <summary>
+/// Diagnostic utility for tracking detailed contact information.
+/// Enable this to log contact data for a specific entity (e.g., Agent-3).
+/// </summary>
+public static class ContactDiagnostics
+{
+    private static readonly List<ContactInfo> _contactHistory = new();
+    private static readonly object _lock = new object();
+    private static int _maxHistorySize = 10000;
+    
+    /// <summary>
+    /// Enable/disable contact diagnostics.
+    /// </summary>
+    public static bool IsEnabled { get; set; } = false;
+    
+    /// <summary>
+    /// Entity ID to track (e.g., 103 for Agent-3).
+    /// </summary>
+    public static int TrackedEntityId { get; set; } = -1;
+    
+    /// <summary>
+    /// Logs a contact event.
+    /// </summary>
+    public static void LogContact(ContactInfo contact)
+    {
+        lock (_lock)
+        {
+            _contactHistory.Add(contact);
+            
+            // Trim history if it gets too large
+            if (_contactHistory.Count > _maxHistorySize)
+            {
+                _contactHistory.RemoveRange(0, _contactHistory.Count - _maxHistorySize);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Gets all recorded contacts.
+    /// </summary>
+    public static List<ContactInfo> GetContactHistory()
+    {
+        lock (_lock)
+        {
+            return new List<ContactInfo>(_contactHistory);
+        }
+    }
+    
+    /// <summary>
+    /// Clears contact history.
+    /// </summary>
+    public static void Clear()
+    {
+        lock (_lock)
+        {
+            _contactHistory.Clear();
+        }
+    }
+    
+    /// <summary>
+    /// Prints a summary of contacts to console.
+    /// </summary>
+    public static void PrintSummary()
+    {
+        lock (_lock)
+        {
+            if (_contactHistory.Count == 0)
+            {
+                Console.WriteLine("[ContactDiagnostics] No contacts recorded.");
+                return;
+            }
+            
+            Console.WriteLine();
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            Console.WriteLine($"║ CONTACT DIAGNOSTICS SUMMARY (Entity {TrackedEntityId})        ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
+            Console.WriteLine($"Total Contacts Recorded: {_contactHistory.Count}");
+            Console.WriteLine($"Time Range: {_contactHistory.First().Timestamp:HH:mm:ss.fff} to {_contactHistory.Last().Timestamp:HH:mm:ss.fff}");
+            Console.WriteLine();
+            
+            // Analyze ground vs non-ground contacts
+            var groundContacts = _contactHistory.Where(c => c.IsGroundContact).ToList();
+            var nonGroundContacts = _contactHistory.Where(c => !c.IsGroundContact).ToList();
+            
+            Console.WriteLine($"Ground Contacts (normal Y > 0.7): {groundContacts.Count} ({100.0 * groundContacts.Count / _contactHistory.Count:F1}%)");
+            Console.WriteLine($"Non-Ground Contacts (wall/ceiling): {nonGroundContacts.Count} ({100.0 * nonGroundContacts.Count / _contactHistory.Count:F1}%)");
+            Console.WriteLine();
+            
+            if (groundContacts.Any())
+            {
+                Console.WriteLine("Ground Contact Statistics:");
+                Console.WriteLine($"  Average Normal Angle: {groundContacts.Average(c => c.NormalAngleDegrees):F2}°");
+                Console.WriteLine($"  Normal Angle Range: [{groundContacts.Min(c => c.NormalAngleDegrees):F2}°, {groundContacts.Max(c => c.NormalAngleDegrees):F2}°]");
+                Console.WriteLine($"  Average Penetration: {groundContacts.Average(c => c.PenetrationDepth):F4}m");
+                Console.WriteLine($"  Max Penetration: {groundContacts.Max(c => c.PenetrationDepth):F4}m");
+                
+                // Find periods where contact was lost
+                var lostContactPeriods = new List<(DateTime start, DateTime end)>();
+                DateTime? lastContactTime = null;
+                
+                foreach (var contact in _contactHistory.OrderBy(c => c.Timestamp))
+                {
+                    if (contact.IsGroundContact)
+                    {
+                        if (lastContactTime.HasValue)
+                        {
+                            var gap = (contact.Timestamp - lastContactTime.Value).TotalSeconds;
+                            if (gap > 0.1) // More than 100ms gap
+                            {
+                                lostContactPeriods.Add((lastContactTime.Value, contact.Timestamp));
+                            }
+                        }
+                        lastContactTime = contact.Timestamp;
+                    }
+                }
+                
+                if (lostContactPeriods.Any())
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"⚠️ Ground Contact Lost {lostContactPeriods.Count} time(s):");
+                    foreach (var (start, end) in lostContactPeriods.Take(10))
+                    {
+                        var duration = (end - start).TotalMilliseconds;
+                        Console.WriteLine($"  - {start:HH:mm:ss.fff} to {end:HH:mm:ss.fff} (gap: {duration:F1}ms)");
+                    }
+                }
+            }
+            
+            Console.WriteLine();
+        }
+    }
+}
+
+/// <summary>
+/// Detailed information about a physics contact.
+/// </summary>
+public struct ContactInfo
+{
+    public int DynamicEntityId { get; set; }
+    public int GroundEntityId { get; set; }
+    public Vector3 ContactNormal { get; set; }
+    public float PenetrationDepth { get; set; }
+    public Vector3 ContactOffset { get; set; }
+    public float NormalAngleDegrees { get; set; }
+    public bool IsGroundContact { get; set; }
+    public DateTime Timestamp { get; set; }
 }

@@ -90,7 +90,7 @@ public static class TestPhysicsPathfindingIntegration
         }
 
         var pathfinder = new Pathfinder(navMeshData);
-        var movementController = new MovementController(physicsWorld, pathfinder);
+        var movementController = new MovementController(physicsWorld, pathfinder, agentConfig);
 
         // Send initial state to visualization
         if (vizServer != null)
@@ -139,11 +139,21 @@ public static class TestPhysicsPathfindingIntegration
 
         var targetPos = new Vector3(10, 1.0f, 10);
         var request = new MovementRequest(1001, targetPos, maxSpeed: 3.0f, agentHeight: 2.0f);
-        movementController.RequestMovement(request);
+        var response = movementController.RequestMovement(request);
 
         Console.WriteLine($"  Agent spawned at: ({spawnPos.X:F2}, {spawnPos.Y:F2}, {spawnPos.Z:F2})");
         Console.WriteLine($"  Target: ({targetPos.X:F2}, {targetPos.Y:F2}, {targetPos.Z:F2})");
-        Console.WriteLine("  Running simulation for 5 seconds...");
+        
+        if (response.Success)
+        {
+            Console.WriteLine($"  Snapped target: ({response.ActualTargetPosition.X:F2}, {response.ActualTargetPosition.Y:F2}, {response.ActualTargetPosition.Z:F2})");
+            Console.WriteLine("  Running simulation for 5 seconds...");
+        }
+        else
+        {
+            Console.WriteLine($"  ✗ Movement failed: {response.Message}");
+            return;
+        }
 
         var startTime = DateTime.UtcNow;
         float simulationTime = 0f;
@@ -227,11 +237,21 @@ public static class TestPhysicsPathfindingIntegration
         // Request movement that will take agent off the platform
         var targetPos = new Vector3(8, -2.0f, 0); // Off platform, on ground below
         var request = new MovementRequest(2003, targetPos, maxSpeed: 3.0f, agentHeight: 2.0f);
-        movementController.RequestMovement(request);
+        var response = movementController.RequestMovement(request);
 
         Console.WriteLine($"  Agent spawned on platform at: ({spawnPos.X:F2}, {spawnPos.Y:F2}, {spawnPos.Z:F2})");
         Console.WriteLine($"  Target (below platform): ({targetPos.X:F2}, {targetPos.Y:F2}, {targetPos.Z:F2})");
-        Console.WriteLine("  Running simulation for 8 seconds...");
+        
+        if (response.Success)
+        {
+            Console.WriteLine($"  Snapped target: ({response.ActualTargetPosition.X:F2}, {response.ActualTargetPosition.Y:F2}, {response.ActualTargetPosition.Z:F2})");
+            Console.WriteLine("  Running simulation for 8 seconds...");
+        }
+        else
+        {
+            Console.WriteLine($"  ✗ Movement failed: {response.Message}");
+            return;
+        }
 
         float simulationTime = 0f;
         const float maxTime = 8.0f;
@@ -309,11 +329,21 @@ public static class TestPhysicsPathfindingIntegration
 
         var targetPos = new Vector3(15, 1.0f, 0);
         var request = new MovementRequest(3001, targetPos, maxSpeed: 3.0f, agentHeight: 2.0f);
-        movementController.RequestMovement(request);
+        var response = movementController.RequestMovement(request);
 
         Console.WriteLine($"  Agent spawned at: ({spawnPos.X:F2}, {spawnPos.Y:F2}, {spawnPos.Z:F2})");
         Console.WriteLine($"  Target: ({targetPos.X:F2}, {targetPos.Y:F2}, {targetPos.Z:F2})");
-        Console.WriteLine("  Running simulation...");
+        
+        if (response.Success)
+        {
+            Console.WriteLine($"  Snapped target: ({response.ActualTargetPosition.X:F2}, {response.ActualTargetPosition.Y:F2}, {response.ActualTargetPosition.Z:F2})");
+            Console.WriteLine("  Running simulation...");
+        }
+        else
+        {
+            Console.WriteLine($"  ✗ Movement failed: {response.Message}");
+            return;
+        }
 
         float simulationTime = 0f;
         const float maxTime = 10.0f;

@@ -202,7 +202,8 @@ public static class TestEnhancedShowcase
             Console.WriteLine();
 
             var pathfinder = new Pathfinder(navMeshData);
-            var movementController = new MovementController(physicsWorld, pathfinder);
+            var pathfindingConfig = new PathfindingConfiguration();
+            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, pathfindingConfig);
             var agentEntities = new List<PhysicsEntity>();
 
             // Get navmesh bounds to calculate appropriate spawn positions
@@ -224,17 +225,53 @@ public static class TestEnhancedShowcase
             var validatedScenarios = new List<(int EntityId, string Name, Vector3 Start, Vector3 Goal)>();
             foreach (var scenario in agentScenarios)
             {
+                Console.WriteLine($"Validating {scenario.Name}:");
+                Console.WriteLine($"  Original Start: ({scenario.Start.X:F2}, {scenario.Start.Y:F2}, {scenario.Start.Z:F2})");
+                Console.WriteLine($"  Original Goal:  ({scenario.Goal.X:F2}, {scenario.Goal.Y:F2}, {scenario.Goal.Z:F2})");
+                
                 var validatedStart = ValidateOrSnapToNavMesh(pathfinder, scenario.Start);
                 var validatedGoal = ValidateOrSnapToNavMesh(pathfinder, scenario.Goal);
                 
                 if (validatedStart.HasValue && validatedGoal.HasValue)
                 {
+                    // Calculate Y offset from original to validated (this shows terrain height difference)
+                    float startYOffset = validatedStart.Value.Y - scenario.Start.Y;
+                    float goalYOffset = validatedGoal.Value.Y - scenario.Goal.Y;
+                    
+                    Console.WriteLine($"  ✓ Validated Start: ({validatedStart.Value.X:F2}, {validatedStart.Value.Y:F2}, {validatedStart.Value.Z:F2}) [Y offset: {startYOffset:+0.00;-0.00;+0.00}]");
+                    Console.WriteLine($"  ✓ Validated Goal:  ({validatedGoal.Value.X:F2}, {validatedGoal.Value.Y:F2}, {validatedGoal.Value.Z:F2}) [Y offset: {goalYOffset:+0.00;-0.00;+0.00}]");
+                    
+                    // Extra validation for Agent-3 to debug the falling issue
+                    if (scenario.EntityId == 103)
+                    {
+                        Console.WriteLine($"  🔍 Agent-3 DETAILED ANALYSIS:");
+                        Console.WriteLine($"     NavMesh surface Y: {validatedStart.Value.Y:F3}");
+                        Console.WriteLine($"     Requested Y was:   {scenario.Start.Y:F3}");
+                        Console.WriteLine($"     Difference:        {startYOffset:F3}m");
+                        
+                        // Check if start and goal are reachable from each other
+                        float horizontalDist = Vector2.Distance(
+                            new Vector2(validatedStart.Value.X, validatedStart.Value.Z),
+                            new Vector2(validatedGoal.Value.X, validatedGoal.Value.Z)
+                        );
+                        float verticalDist = Math.Abs(validatedGoal.Value.Y - validatedStart.Value.Y);
+                        Console.WriteLine($"     Distance to goal:  {horizontalDist:F2}m horizontal, {verticalDist:F2}m vertical");
+                        
+                        if (verticalDist > 3.0f)
+                        {
+                            Console.WriteLine($"     ⚠ WARNING: Large vertical distance suggests separate islands!");
+                        }
+                    }
+                    
                     validatedScenarios.Add((scenario.EntityId, scenario.Name, validatedStart.Value, validatedGoal.Value));
                 }
                 else
                 {
-                    Console.WriteLine($"⚠ Skipping {scenario.Name}: invalid spawn/goal positions");
+                    Console.WriteLine($"  ✗ Skipping {scenario.Name}: invalid spawn/goal positions");
+                    if (!validatedStart.HasValue) Console.WriteLine($"    - Start position not on navmesh");
+                    if (!validatedGoal.HasValue) Console.WriteLine($"    - Goal position not on navmesh");
                 }
+                Console.WriteLine();
             }
 
             const float agentMass = 1.0f;
@@ -248,17 +285,35 @@ public static class TestEnhancedShowcase
                 );
 
                 // FIXED: Calculate proper spawn position for capsule
-                // Capsule in BepuPhysics: radius + length (cylinder) + radius
-                // Total height = length + 2*radius = 1.8 + 2*0.4 = 2.6
-                // Half-height (bottom of capsule to center) = (length/2 + radius) = 0.9 + 0.4 = 1.3
+                // Capsule in BepuPhysics: length (cylinder) + 2*radius (hemispheres)
+                // With Height=2.0m and Radius=0.4m:
+                //   - Total height = 2.0 + 2*0.4 = 2.8m
+                //   - Half-height (bottom to center) = 2.8/2 = 1.4m
                 // For capsule to stand on navmesh surface: center Y = surface Y + half-height
-                float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius; // length/2 + radius
+                // IMPORTANT: scenario.Start.Y is the validated navmesh surface Y
+                float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius; // = 1.0 + 0.4 = 1.4m
                 
                 var spawnPosition = new Vector3(
                     scenario.Start.X, 
-                    scenario.Start.Y + capsuleHalfHeight,  // Center of capsule positioned so bottom touches surface
+                    scenario.Start.Y + capsuleHalfHeight,  // scenario.Start.Y is the validated navmesh surface
                     scenario.Start.Z
                 );
+
+                // Extra detailed logging for Agent-3
+                if (scenario.EntityId == 103)
+                {
+                    Console.WriteLine($"🔍 AGENT-3 SPAWN DETAILS:");
+                    Console.WriteLine($"    Validated surface Y:   {scenario.Start.Y:F3}m");
+                    Console.WriteLine($"    Capsule half-height:   {capsuleHalfHeight:F3}m");
+                    Console.WriteLine($"    Physics center Y:      {spawnPosition.Y:F3}m");
+                    Console.WriteLine($"    Expected bottom Y:     {(spawnPosition.Y - capsuleHalfHeight):F3}m (should match surface)");
+                    Console.WriteLine($"    Capsule dimensions:    Height={agentConfig.Height}m, Radius={agentConfig.Radius}m");
+                }
+                else
+                {
+                    Console.WriteLine($"    Spawning at: ({spawnPosition.X:F2}, {spawnPosition.Y:F2}, {spawnPosition.Z:F2})");
+                    Console.WriteLine($"    Surface Y: {scenario.Start.Y:F2}, Capsule offset: +{capsuleHalfHeight:F2}");
+                }
 
                 // FIXED: Enable gravity for proper physics simulation
                 // CharacterController will manage grounding and prevent sinking
@@ -323,10 +378,40 @@ public static class TestEnhancedShowcase
 
             // SETTLING PHASE: Only needed for dynamic obstacles (NPCs), not kinematic agents
             Console.WriteLine("Phase 5a: Settling dynamic obstacles (3 seconds, 190 steps)...");
+            
+            // Store agent EXPECTED positions based on validated navmesh surface
+            // CRITICAL FIX: Use the validated navmesh Y, not the physics spawn Y
+            var agentExpectedPositions = new Dictionary<int, Vector3>();
+            foreach (var scenario in validatedScenarios)
+            {
+                // Calculate exact expected position: navmesh surface Y + capsule half-height
+                float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                var expectedPos = new Vector3(
+                    scenario.Start.X,
+                    scenario.Start.Y + capsuleHalfHeight,  // scenario.Start.Y is the validated navmesh surface
+                    scenario.Start.Z
+                );
+                agentExpectedPositions[scenario.EntityId] = expectedPos;
+                
+                Console.WriteLine($"  {scenario.Name}: Expected spawn at ({expectedPos.X:F2}, {expectedPos.Y:F2}, {expectedPos.Z:F2})");
+            }
+            Console.WriteLine();
+            
             for (int i = 0; i < 190; i++)
             {
                 // Only update physics to let NPCs fall and settle
                 physicsWorld.Update(0.016f);
+                
+                // CRITICAL FIX: Keep agents at EXACT expected positions during settling
+                // This ensures agents spawn on the navmesh surface, not floating above it
+                foreach (var agent in agentEntities)
+                {
+                    if (agentExpectedPositions.TryGetValue(agent.EntityId, out var expectedPos))
+                    {
+                        physicsWorld.SetEntityVelocity(agent, Vector3.Zero);
+                        physicsWorld.SetEntityPosition(agent, expectedPos);
+                    }
+                }
 
                 // Broadcast state
                 var settleState = SimulationStateBuilder.BuildFromPhysicsWorld(
@@ -367,12 +452,33 @@ public static class TestEnhancedShowcase
             }
             Console.WriteLine();
             
-            // Check initial agent positions (should be on navmesh surface)
-            Console.WriteLine("  Initial agent positions (gravity-enabled, will be corrected by kinematic system):");
+            // Check initial agent positions (should match expected positions EXACTLY)
+            Console.WriteLine("  Agent positions after settling:");
             foreach (var agent in agentEntities)
             {
                 var pos = physicsWorld.GetEntityPosition(agent);
-                Console.WriteLine($"    Agent-{agent.EntityId}: ({pos.X:F1}, {pos.Y:F1}, {pos.Z:F1})");
+                if (agentExpectedPositions.TryGetValue(agent.EntityId, out var expectedPos))
+                {
+                    float yError = Math.Abs(pos.Y - expectedPos.Y);
+                    string errorStr = yError > 0.01f ? $"⚠ ERROR: {yError:F3}m off!" : "✓";
+                    
+                    if (agent.EntityId == 103)
+                    {
+                        Console.WriteLine($"    🔍 AGENT-3 POST-SETTLING:");
+                        Console.WriteLine($"       Current position:  ({pos.X:F3}, {pos.Y:F3}, {pos.Z:F3})");
+                        Console.WriteLine($"       Expected position: ({expectedPos.X:F3}, {expectedPos.Y:F3}, {expectedPos.Z:F3})");
+                        Console.WriteLine($"       Y error: {yError:F3}m {errorStr}");
+                        
+                        // Calculate expected ground contact Y
+                        float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                        float expectedGroundY = pos.Y - capsuleHalfHeight;
+                        Console.WriteLine($"       Ground contact at: {expectedGroundY:F3}m (capsule bottom)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"    Agent-{agent.EntityId}: ({pos.X:F1}, {pos.Y:F2}, {pos.Z:F1}) {errorStr}");
+                    }
+                }
             }
             Console.WriteLine();
 
@@ -390,14 +496,32 @@ public static class TestEnhancedShowcase
                 {
                     // Agents are kinematic - they're already at their start positions on the navmesh
                     var currentPos = physicsWorld.GetEntityPosition(entity);
-                    Console.WriteLine($"  {scenario.Name}: Starting from ({currentPos.X:F1}, {currentPos.Y:F1}, {currentPos.Z:F1})");
+                    Console.WriteLine($"  {scenario.Name}:");
+                    Console.WriteLine($"    Current physics position: ({currentPos.X:F1}, {currentPos.Y:F1}, {currentPos.Z:F1})");
+                    Console.WriteLine($"    Pathfinding from: ({scenario.Start.X:F1}, {scenario.Start.Y:F1}, {scenario.Start.Z:F1})");
+                    Console.WriteLine($"    Pathfinding to: ({scenario.Goal.X:F1}, {scenario.Goal.Y:F1}, {scenario.Goal.Z:F1})");
                     
-                    // Use larger search extents for better path finding
-                    var extents = new Vector3(30.0f, 20.0f, 30.0f);
+                    // Use production search extents for realistic testing
+                    var extents = new Vector3(
+                        pathfindingConfig.PathfindingSearchExtentsHorizontal,
+                        pathfindingConfig.PathfindingSearchExtentsVertical,
+                        pathfindingConfig.PathfindingSearchExtentsHorizontal
+                    );
                     var pathResult = pathfinder.FindPath(scenario.Start, scenario.Goal, extents);
 
                     if (pathResult.Success && pathResult.Waypoints.Count > 0)
                     {
+                        // Show waypoints for Agent-3 to debug the falling issue
+                        if (scenario.EntityId == 103)
+                        {
+                            Console.WriteLine($"    Agent-3 waypoints:");
+                            for (int i = 0; i < pathResult.Waypoints.Count; i++)
+                            {
+                                var wp = pathResult.Waypoints[i];
+                                Console.WriteLine($"      [{i}] ({wp.X:F2}, {wp.Y:F2}, {wp.Z:F2})");
+                            }
+                        }
+                        
                         // Validate path continuity
                         bool pathValid = ValidatePathContinuity(pathResult.Waypoints);
                         
@@ -412,18 +536,23 @@ public static class TestEnhancedShowcase
                                 agentHeight: agentConfig.Height,
                                 agentRadius: agentConfig.Radius
                             );
-                            movementController.RequestMovement(moveRequest);
-                            metric.PathfindingRequests = 1;
+                            var movementResponse = movementController.RequestMovement(moveRequest);
                             
-                            // Calculate path length and estimated time
-                            float pathLength = 0;
-                            for (int i = 1; i < pathResult.Waypoints.Count; i++)
+                            if (movementResponse.Success)
                             {
-                                pathLength += Vector3.Distance(pathResult.Waypoints[i - 1], pathResult.Waypoints[i]);
+                                metric.PathfindingRequests = 1;
+                                
+                                // Log actual positions being used
+                                Console.WriteLine($"    ✓ Movement started successfully");
+                                Console.WriteLine($"      Snapped start: ({movementResponse.ActualStartPosition.X:F2}, {movementResponse.ActualStartPosition.Y:F2}, {movementResponse.ActualStartPosition.Z:F2})");
+                                Console.WriteLine($"      Snapped target: ({movementResponse.ActualTargetPosition.X:F2}, {movementResponse.ActualTargetPosition.Y:F2}, {movementResponse.ActualTargetPosition.Z:F2})");
+                                Console.WriteLine($"      Path: {movementResponse.PathResult!.Waypoints.Count} waypoints, {movementResponse.EstimatedPathLength:F1}m, ~{movementResponse.EstimatedTime:F1}s");
                             }
-                            float estimatedTime = pathLength / 5.0f; // At 5 m/s
-                            
-                            Console.WriteLine($"    ✓ Path found: {pathResult.Waypoints.Count} waypoints, {pathLength:F1}m, ~{estimatedTime:F1}s at 5m/s");
+                            else
+                            {
+                                Console.WriteLine($"    ✗ Movement failed: {movementResponse.Message}");
+                                metric.ReachedGoal = false;
+                            }
                         }
                         else
                         {
@@ -520,6 +649,46 @@ public static class TestEnhancedShowcase
                 );
                 vizServer.BroadcastState(state);
 
+                // Extra detailed tracking for Agent-3 every 30 steps (~0.5s)
+                if (i % 30 == 0)
+                {
+                    var agent3 = agentEntities.FirstOrDefault(e => e.EntityId == 103);
+                    if (agent3 != null)
+                    {
+                        var pos = physicsWorld.GetEntityPosition(agent3);
+                        var vel = physicsWorld.GetEntityVelocity(agent3);
+                        var metric = agentMetrics.FirstOrDefault(m => m.EntityId == 103);
+                        
+                        if (metric != null)
+                        {
+                            var dist = Vector3.Distance(pos, metric.GoalPosition);
+                            float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                            float groundContactY = pos.Y - capsuleHalfHeight;
+                            float expectedSurfaceY = metric.StartPosition.Y;
+                            
+                            // Check if agent has fallen significantly (Y < -10 means it fell through world)
+                            if (pos.Y < -10.0f)
+                            {
+                                Console.WriteLine($"🚨🚨🚨 CRITICAL: Agent-3 has fallen through the world!");
+                                Console.WriteLine($"         Step: {i + 1}, Position: ({pos.X:F2}, {pos.Y:F2}, {pos.Z:F2})");
+                                Console.WriteLine($"         Velocity: ({vel.X:F2}, {vel.Y:F2}, {vel.Z:F2})");
+                                Console.WriteLine($"         This agent is in free-fall and needs intervention!");
+                            }
+                            else if (groundContactY < expectedSurfaceY - 2.0f)
+                            {
+                                Console.WriteLine($"⚠⚠ WARNING: Agent-3 is sinking/falling!");
+                                Console.WriteLine($"   Step: {i + 1}, Center Y: {pos.Y:F2}, Ground contact: {groundContactY:F2}");
+                                Console.WriteLine($"   Expected surface: {expectedSurfaceY:F2}, Diff: {(groundContactY - expectedSurfaceY):F2}m");
+                                Console.WriteLine($"   Velocity Y: {vel.Y:F2}m/s, Speed: {vel.Length():F2}m/s");
+                                
+                                // Check if pathfinding is active
+                                bool isPathfindingActive = metric.PathfindingRequests > 0;
+                                Console.WriteLine($"   Pathfinding: {(isPathfindingActive ? "ACTIVE" : "INACTIVE")}");
+                            }
+                        }
+                    }
+                }
+                
                 // Progress reports
                 if (i % reportInterval == 0 || i == steps - 1)
                 {
@@ -551,7 +720,7 @@ public static class TestEnhancedShowcase
                             else
                                 status = $"→ Moving ({dist:F1}m away, {vel.Length():F1}m/s)";
                             
-                            Console.WriteLine($"  {metric.Name}: Y={pos.Y:F1} - {status}");
+                            Console.WriteLine($"  {metric.Name}: Pos=({pos.X:F1}, {pos.Y:F1}, {pos.Z:F1}) - {status}");
                         }
                     }
                     Console.WriteLine();
@@ -587,15 +756,48 @@ public static class TestEnhancedShowcase
             
             foreach (var metric in agentMetrics)
             {
+                var entity = agentEntities.FirstOrDefault(e => e.EntityId == metric.EntityId);
+                var finalPos = entity != null ? physicsWorld.GetEntityPosition(entity) : Vector3.Zero;
+                
                 Console.WriteLine($"{metric.Name}:");
                 Console.WriteLine($"  Status:          {(metric.ReachedGoal ? "✓ SUCCESS" : "✗ FAILED")}");
                 Console.WriteLine($"  Direct Distance: {metric.TotalDistance:F2}m");
                 Console.WriteLine($"  Path Traveled:   {metric.DistanceTraveled:F2}m");
+                
                 if (metric.ReachedGoal)
                 {
                     Console.WriteLine($"  Time to Goal:    {metric.TimeToGoal:F2}s");
                     Console.WriteLine($"  Avg Speed:       {metric.DistanceTraveled / metric.TimeToGoal:F2}m/s");
                 }
+                
+                // Extra check for Agent-3 to see if it fell
+                if (metric.EntityId == 103 && entity != null)
+                {
+                    Console.WriteLine($"  🔍 AGENT-3 FINAL STATUS:");
+                    Console.WriteLine($"     Final position:   ({finalPos.X:F2}, {finalPos.Y:F2}, {finalPos.Z:F2})");
+                    Console.WriteLine($"     Start position:   ({metric.StartPosition.X:F2}, {metric.StartPosition.Y:F2}, {metric.StartPosition.Z:F2})");
+                    
+                    float yChange = finalPos.Y - metric.StartPosition.Y;
+                    float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                    float finalGroundY = finalPos.Y - capsuleHalfHeight;
+                    
+                    if (finalPos.Y < -10.0f)
+                    {
+                        Console.WriteLine($"     🚨 FELL THROUGH WORLD! (Y={finalPos.Y:F2})");
+                    }
+                    else if (yChange < -5.0f)
+                    {
+                        Console.WriteLine($"     ⚠ Dropped {Math.Abs(yChange):F2}m from start");
+                    }
+                    else if (Math.Abs(yChange) < 2.0f)
+                    {
+                        Console.WriteLine($"     ✓ Maintained height (Y change: {yChange:+0.00;-0.00}m)");
+                    }
+                    
+                    Console.WriteLine($"     Ground contact:   {finalGroundY:F2}m");
+                    Console.WriteLine($"     Expected surface: {metric.StartPosition.Y:F2}m");
+                }
+                
                 Console.WriteLine();
             }
 
@@ -864,20 +1066,24 @@ public static class TestEnhancedShowcase
         
         var scenarios = new List<(int, string, Vector3, Vector3)>
         {
-            // IMPROVED: Shorter, more achievable paths in safe zones
-            // Center-based movements (safest)
+            // Server-specified spawn positions (XZ coordinates are intentional, Y will be validated against terrain)
+            // These represent actual game spawn points - e.g., team bases, objectives, respawn locations
             (101, "Agent-1 [Center→North]", 
-                new Vector3(center.X, baseY, center.Z), 
-                new Vector3(center.X, baseY, safeMax.Z)),
+                new Vector3(4.82f, baseY, -5.79f),  // Use baseY as initial guess, will be snapped to actual terrain
+                new Vector3(1.16f, baseY, 5.67f)
+                ),
             (102, "Agent-2 [Center→South]", 
-                new Vector3(center.X, baseY, center.Z), 
-                new Vector3(center.X, baseY, safeMin.Z)),
+                new Vector3(23.8f, baseY, 17.78f), 
+                new Vector3(-21f, baseY, -3.93f)
+                ),
             (103, "Agent-3 [Center→East]", 
-                new Vector3(center.X, baseY, center.Z), 
-                new Vector3(safeMax.X, baseY, center.Z)),
+                new Vector3(51.89f, 0.29f, 10.19f), 
+                new Vector3(45.33f, 8, 18.96f)
+                ),
             (104, "Agent-4 [West→Center]", 
-                new Vector3(safeMin.X, baseY, center.Z), 
-                new Vector3(center.X, baseY, center.Z)),
+                new Vector3(51.2f, baseY, -42.6f),  // Keep server's desired XZ, Y will be corrected
+                new Vector3(33.26f, baseY, -23.13f)
+                ),
             (105, "Agent-5 [ShortDiag-NE]", 
                 new Vector3(safeMin.X, baseY, safeMin.Z), 
                 new Vector3(center.X, baseY, center.Z)),
@@ -951,11 +1157,13 @@ public static class TestEnhancedShowcase
     /// <summary>
     /// Validates and snaps a position to the nearest valid navmesh location.
     /// Returns null if no valid position found within search extents.
+    /// Uses larger vertical search extent for separated terrain with height variations.
     /// </summary>
     private static Vector3? ValidateOrSnapToNavMesh(Pathfinder pathfinder, Vector3 position)
     {
-        // Use larger search extents to find positions even if they're far from navmesh
-        var extents = new Vector3(100.0f, 50.0f, 100.0f); // Very large search area
+        // IMPROVED: Use larger vertical extent (20m instead of 10m) for separated islands with height differences
+        // Horizontal extent kept at 5m to avoid snapping to distant islands
+        var extents = new Vector3(5.0f, 20.0f, 5.0f);
         
         // Try to find nearest valid position on navmesh
         var query = pathfinder.NavMeshData.Query;
@@ -974,8 +1182,25 @@ public static class TestEnhancedShowcase
         if (status.Succeeded() && polyRef != 0)
         {
             var snappedPos = new Vector3(nearestPt.X, nearestPt.Y, nearestPt.Z);
-            float distance = Vector3.Distance(position, snappedPos);
-            Console.WriteLine($"  → Snapped to ({snappedPos.X:F1}, {snappedPos.Y:F1}, {snappedPos.Z:F1}) [distance: {distance:F1}m]");
+            float horizontalDist = Vector2.Distance(
+                new Vector2(position.X, position.Z),
+                new Vector2(snappedPos.X, snappedPos.Z)
+            );
+            float verticalDist = Math.Abs(snappedPos.Y - position.Y);
+            
+            Console.WriteLine($"  → Snapped to ({snappedPos.X:F2}, {snappedPos.Y:F2}, {snappedPos.Z:F2})");
+            Console.WriteLine($"     Snap distance: {horizontalDist:F2}m horizontal, {verticalDist:F2}m vertical");
+            
+            // Warn if the snap distance is large (might indicate wrong island or position)
+            if (horizontalDist > 2.0f)
+            {
+                Console.WriteLine($"     ⚠ Large horizontal snap - position may be off the navmesh!");
+            }
+            if (verticalDist > 5.0f)
+            {
+                Console.WriteLine($"     ⚠ Large vertical snap - Y coordinate may be incorrect for this terrain!");
+            }
+            
             return snappedPos;
         }
         
@@ -986,7 +1211,7 @@ public static class TestEnhancedShowcase
     
     /// <summary>
     /// Validates path continuity to detect holes and gaps before movement.
-    /// Returns false if path has large vertical discontinuities indicating holes.
+    /// Returns false if path has large vertical discontinuities indicating holes/gaps.
     /// </summary>
     private static bool ValidatePathContinuity(IReadOnlyList<Vector3> waypoints)
     {
@@ -1001,10 +1226,42 @@ public static class TestEnhancedShowcase
                 new Vector2(waypoints[i - 1].X, waypoints[i - 1].Z)
             );
             
-            // If large height change over short distance, might be crossing hole
+            // CASE 1: Large height change over short horizontal distance (steep cliff/hole)
             // Threshold: >2m height change over <1m horizontal distance
             if (heightDiff > 2.0f && horizontalDist < 1.0f)
             {
+                Console.WriteLine($"    ⚠ Path validation failed: Steep height change detected");
+                Console.WriteLine($"       Waypoint [{i-1}] to [{i}]: {heightDiff:F1}m height over {horizontalDist:F1}m horizontal");
+                return false;
+            }
+            
+            // CASE 2: Large height change with insufficient horizontal distance (gap/hole, not a ramp)
+            // A legitimate ramp spreads height change over distance (low slope)
+            // A gap/hole has large height change over short distance (high slope)
+            // Threshold: Height/Distance ratio > 0.5 means slope > 45° (too steep for walking, likely a gap)
+            if (heightDiff > 3.0f && horizontalDist > 0.1f)  // Only check if significant height change
+            {
+                float slope = heightDiff / horizontalDist;  // Height change per meter of horizontal distance
+                const float maxWalkableSlope = 0.5f;  // 0.5 = 50cm rise per 1m horizontal = ~27° angle
+                
+                if (slope > maxWalkableSlope)
+                {
+                    Console.WriteLine($"    ⚠ Path validation failed: Slope too steep (likely a gap, not a ramp)");
+                    Console.WriteLine($"       Waypoint [{i-1}]: Y={waypoints[i-1].Y:F2}, Waypoint [{i}]: Y={waypoints[i].Y:F2}");
+                    Console.WriteLine($"       Height change: {heightDiff:F1}m over {horizontalDist:F1}m horizontal");
+                    Console.WriteLine($"       Slope: {slope:F2} (max walkable: {maxWalkableSlope:F2})");
+                    Console.WriteLine($"       This indicates a gap/cliff, not a traversable ramp");
+                    return false;
+                }
+            }
+            
+            // CASE 3: Very long waypoint segment (potential navmesh connection over void)
+            // Threshold: >25m between waypoints might indicate navmesh polygon stretching across void
+            if (horizontalDist > 25.0f)
+            {
+                Console.WriteLine($"    ⚠ Path validation failed: Very long waypoint segment detected");
+                Console.WriteLine($"       Waypoint [{i-1}] to [{i}]: {horizontalDist:F1}m horizontal distance");
+                Console.WriteLine($"       This might indicate navmesh connection across empty space");
                 return false;
             }
         }
