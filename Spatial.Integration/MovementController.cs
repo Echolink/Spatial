@@ -71,6 +71,19 @@ public class MovementController
     
     /// <summary>
     /// Creates a new movement controller with velocity-based character controller.
+    /// 
+    /// ⚠️ LEGACY: This constructor creates velocity-based controller (backup only).
+    /// 
+    /// ✅ PRODUCTION: Use constructor with MotorCharacterController instead:
+    /// <code>
+    /// var pathfindingService = new PathfindingService(pathfinder, agentConfig, config);
+    /// var motorController = new MotorCharacterController(physicsWorld);
+    /// var movementController = new MovementController(
+    ///     physicsWorld, pathfindingService, agentConfig, config, motorController
+    /// );
+    /// </code>
+    /// 
+    /// See PRODUCTION_ARCHITECTURE.md for complete guide.
     /// </summary>
     /// <param name="physicsWorld">Physics world instance</param>
     /// <param name="pathfinder">Pathfinder instance (should use same AgentConfig as this controller)</param>

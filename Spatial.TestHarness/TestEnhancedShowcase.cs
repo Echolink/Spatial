@@ -203,7 +203,9 @@ public static class TestEnhancedShowcase
 
             var pathfinder = new Pathfinder(navMeshData);
             var pathfindingConfig = new PathfindingConfiguration();
-            var movementController = new MovementController(physicsWorld, pathfinder, agentConfig, pathfindingConfig);
+            var pathfindingService = new PathfindingService(pathfinder, agentConfig, pathfindingConfig);
+            var motorController = new MotorCharacterController(physicsWorld);
+            var movementController = new MovementController(physicsWorld, pathfindingService, agentConfig, pathfindingConfig, motorController);
             var agentEntities = new List<PhysicsEntity>();
 
             // Get navmesh bounds to calculate appropriate spawn positions
