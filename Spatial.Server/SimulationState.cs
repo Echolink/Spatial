@@ -10,6 +10,7 @@ public class SimulationState
     public List<EntityState> Entities { get; set; } = new();
     public NavMeshGeometry? NavMesh { get; set; }
     public PathData? CurrentPath { get; set; }
+    public List<PathData> AgentPaths { get; set; } = new(); // Paths for all agents
     public float Timestamp { get; set; }
 }
 

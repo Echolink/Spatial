@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace Spatial.Unity
@@ -23,11 +24,22 @@ namespace Spatial.Unity
         public bool showVelocityVectors = true;
         public float velocityVectorScale = 0.3f;
         
+        [Header("Position Smoothing")]
+        [Tooltip("Enable smooth interpolation between positions (fixes laggy appearance)")]
+        public bool enableSmoothing = true;
+        
+        [Tooltip("Interpolation speed (higher = more responsive, 15-20 recommended)")]
+        [Range(1f, 30f)]
+        public float smoothingSpeed = 18f;
+        
         [Header("Auto Create Materials")]
         public bool autoCreateMaterials = true;
         
-        private Dictionary<int, GameObject> entityObjects = new Dictionary<int, GameObject>();
-        private Dictionary<int, LineRenderer> velocityLines = new Dictionary<int, LineRenderer>();
+    private Dictionary<int, GameObject> entityObjects = new Dictionary<int, GameObject>();
+    private Dictionary<int, LineRenderer> velocityLines = new Dictionary<int, LineRenderer>();
+    private Dictionary<int, Vector3> targetPositions = new Dictionary<int, Vector3>();
+    private Dictionary<int, Quaternion> targetRotations = new Dictionary<int, Quaternion>();
+    private Dictionary<int, Vector3> previousTargetPositions = new Dictionary<int, Vector3>();
         
         void Start()
         {
@@ -57,6 +69,79 @@ namespace Spatial.Unity
             else
             {
                 Debug.LogError("[EntityVisualizer] No SimulationClient found on this GameObject!");
+            }
+        }
+        
+        /// <summary>
+        /// Continue interpolating towards target positions between WebSocket updates.
+        /// This provides smooth movement at Unity's frame rate regardless of WebSocket rate.
+        /// </summary>
+        void Update()
+        {
+            if (!enableSmoothing)
+                return;
+            
+            // Interpolate ALL entities towards their target positions
+            // This runs every Unity frame (60-144 FPS) for ultra-smooth movement
+            foreach (var kvp in entityObjects)
+            {
+                int entityId = kvp.Key;
+                GameObject entityObj = kvp.Value;
+                
+                // Interpolate position if we have a target
+                if (targetPositions.TryGetValue(entityId, out Vector3 targetPos))
+                {
+                    // Use frame-rate independent interpolation
+                    // Higher smoothingSpeed = more responsive, lower = smoother but more lag
+                    float t = 1f - Mathf.Exp(-smoothingSpeed * Time.deltaTime);
+                    
+                    Vector3 currentPos = entityObj.transform.position;
+                    
+                    // Detect if entity is on a slope/ramp by checking height change rate
+                    bool isOnSlope = false;
+                    if (previousTargetPositions.TryGetValue(entityId, out Vector3 prevTarget))
+                    {
+                        float horizontalDist = Mathf.Sqrt(
+                            (targetPos.x - prevTarget.x) * (targetPos.x - prevTarget.x) +
+                            (targetPos.z - prevTarget.z) * (targetPos.z - prevTarget.z)
+                        );
+                        float heightChange = Mathf.Abs(targetPos.y - prevTarget.y);
+                        
+                        // If height changes significantly relative to horizontal distance, we're on a slope
+                        if (horizontalDist > 0.01f && heightChange > 0.05f)
+                        {
+                            float slope = heightChange / horizontalDist;
+                            isOnSlope = slope > 0.1f; // More than 10% grade = slope
+                        }
+                    }
+                    
+                    if (isOnSlope)
+                    {
+                        // On slope: Apply smoothing to ALL axes to follow the waypoint path precisely
+                        // This prevents cutting corners around ramps
+                        entityObj.transform.position = Vector3.Lerp(currentPos, targetPos, t);
+                    }
+                    else
+                    {
+                        // Flat terrain: Apply Y instantly to prevent sinking, smooth X/Z for fluid movement
+                        entityObj.transform.position = new Vector3(
+                            Mathf.Lerp(currentPos.x, targetPos.x, t),  // Smooth X
+                            targetPos.y,                                 // Instant Y (prevents sinking)
+                            Mathf.Lerp(currentPos.z, targetPos.z, t)   // Smooth Z
+                        );
+                    }
+                }
+                
+                // Interpolate rotation if we have a target
+                if (targetRotations.TryGetValue(entityId, out Quaternion targetRot))
+                {
+                    float t = 1f - Mathf.Exp(-smoothingSpeed * Time.deltaTime);
+                    entityObj.transform.rotation = Quaternion.Slerp(
+                        entityObj.transform.rotation,
+                        targetRot,
+                        t
+                    );
+                }
             }
         }
         
@@ -154,7 +239,41 @@ namespace Spatial.Unity
             
             entityObjects[state.Id] = entityObj;
             
-            // Initial update
+            // Set initial position DIRECTLY (no interpolation for spawn)
+            // This prevents the agent from appearing at (0,0,0) and slowly moving to spawn point
+            if (state.Position.Length >= 3)
+            {
+                float yOffset = 0;
+                if (state.ShapeType == "Capsule" && state.Size.Length >= 2)
+                {
+                    float capsuleHeight = state.Size[1];
+                    yOffset = -capsuleHeight * 0.5f;
+                }
+                
+                Vector3 spawnPos = new Vector3(
+                    -state.Position[0],
+                    state.Position[1] + yOffset,
+                    state.Position[2]
+                );
+                
+                entityObj.transform.position = spawnPos;
+                targetPositions[state.Id] = spawnPos; // Store as target too
+            }
+            
+            if (state.Rotation.Length >= 4)
+            {
+                Quaternion spawnRot = new Quaternion(
+                    state.Rotation[0],
+                    state.Rotation[1],
+                    state.Rotation[2],
+                    state.Rotation[3]
+                );
+                
+                entityObj.transform.rotation = spawnRot;
+                targetRotations[state.Id] = spawnRot;
+            }
+            
+            // Now update normally for subsequent frames
             UpdateEntityObject(state);
         }
         
@@ -333,22 +452,45 @@ namespace Spatial.Unity
                 // Apply coordinate system transformation
                 // Unity uses left-handed coordinate system, server uses right-handed
                 // Negate X-axis to match Unity's OBJ importer behavior
-                entityObj.transform.position = new Vector3(
+                Vector3 targetPos = new Vector3(
                     -state.Position[0],
                     state.Position[1] + yOffset,  // Apply feet-pivot offset for capsules
                     state.Position[2]
                 );
+                
+                // Store previous target for slope detection
+                if (targetPositions.TryGetValue(state.Id, out Vector3 oldTarget))
+                {
+                    previousTargetPositions[state.Id] = oldTarget;
+                }
+                
+                // Store target position for interpolation
+                targetPositions[state.Id] = targetPos;
+                
+                // If smoothing disabled, apply position instantly
+                if (!enableSmoothing || state.IsStatic)
+                {
+                    entityObj.transform.position = targetPos;
+                }
             }
             
             // Update rotation
             if (state.Rotation.Length >= 4)
             {
-                entityObj.transform.rotation = new Quaternion(
+                Quaternion targetRot = new Quaternion(
                     state.Rotation[0],
                     state.Rotation[1],
                     state.Rotation[2],
                     state.Rotation[3]
                 );
+                
+                targetRotations[state.Id] = targetRot;
+                
+                // If smoothing disabled, apply rotation instantly
+                if (!enableSmoothing || state.IsStatic)
+                {
+                    entityObj.transform.rotation = targetRot;
+                }
             }
             
             // Update velocity visualization
@@ -382,10 +524,10 @@ namespace Spatial.Unity
                 entityObjects.Remove(id);
             }
             
-            if (velocityLines.ContainsKey(id))
-            {
-                velocityLines.Remove(id);
-            }
+            velocityLines.Remove(id);
+            targetPositions.Remove(id);
+            targetRotations.Remove(id);
+            previousTargetPositions.Remove(id);
         }
         
         /// <summary>
@@ -409,6 +551,9 @@ namespace Spatial.Unity
             }
             entityObjects.Clear();
             velocityLines.Clear();
+            targetPositions.Clear();
+            targetRotations.Clear();
+            previousTargetPositions.Clear();
         }
     }
 }

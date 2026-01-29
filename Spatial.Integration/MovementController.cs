@@ -70,6 +70,32 @@ public class MovementController
     }
     
     /// <summary>
+    /// Gets the current waypoints for an entity (for visualization/debugging).
+    /// Returns null if entity has no active movement state.
+    /// </summary>
+    public List<Vector3>? GetWaypoints(int entityId)
+    {
+        if (_movementStates.TryGetValue(entityId, out var state))
+        {
+            return new List<Vector3>(state.Waypoints);
+        }
+        return null;
+    }
+    
+    /// <summary>
+    /// Gets the current waypoint index for an entity (for visualization/debugging).
+    /// Returns -1 if entity has no active movement state.
+    /// </summary>
+    public int GetCurrentWaypointIndex(int entityId)
+    {
+        if (_movementStates.TryGetValue(entityId, out var state))
+        {
+            return state.CurrentWaypointIndex;
+        }
+        return -1;
+    }
+    
+    /// <summary>
     /// Creates a new movement controller with velocity-based character controller.
     /// 
     /// ⚠️ LEGACY: This constructor creates velocity-based controller (backup only).

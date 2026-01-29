@@ -407,6 +407,25 @@ public static class TestMotorVsVelocity
                 if (step % 5 == 0)  // Broadcast every 5 steps
                 {
                     var state = SimulationStateBuilder.BuildFromPhysicsWorld(physicsWorld, navMeshData, null, agent.EntityId);
+                    
+                    // Add waypoints for visualization
+                    var waypoints = movementController.GetWaypoints(agent.EntityId);
+                    if (waypoints != null && waypoints.Count > 0)
+                    {
+                        state.AgentPaths.Add(new PathData
+                        {
+                            EntityId = agent.EntityId,
+                            Waypoints = waypoints.Select(wp => new[] { wp.X, wp.Y, wp.Z }).ToList(),
+                            PathLength = 0
+                        });
+                        
+                        // Debug log first broadcast
+                        if (step == 0)
+                        {
+                            Console.WriteLine($"[MotorTest] Broadcasting agent path with {waypoints.Count} waypoints");
+                        }
+                    }
+                    
                     vizServer.BroadcastState(state);
                 }
                 

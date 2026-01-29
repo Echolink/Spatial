@@ -149,6 +149,7 @@ namespace Spatial.Unity
         public List<EntityState> Entities = new List<EntityState>();
         public NavMeshGeometry NavMesh;
         public PathData CurrentPath;
+        public List<PathData> AgentPaths = new List<PathData>(); // Paths for all agents
     }
     
     /// <summary>

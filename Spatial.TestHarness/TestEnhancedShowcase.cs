@@ -82,7 +82,7 @@ public static class TestEnhancedShowcase
             var config = new PhysicsConfiguration
             {
                 Gravity = new Vector3(0, -9.81f, 0),
-                Timestep = 0.016f
+                Timestep = 0.008f  // Increased from 60fps (0.016) to 125fps for smoother motion
             };
             physicsWorld = new PhysicsWorld(config);
             Console.WriteLine("✓ Physics world initialized");
@@ -204,7 +204,17 @@ public static class TestEnhancedShowcase
             var pathfinder = new Pathfinder(navMeshData);
             var pathfindingConfig = new PathfindingConfiguration();
             var pathfindingService = new PathfindingService(pathfinder, agentConfig, pathfindingConfig);
-            var motorController = new MotorCharacterController(physicsWorld);
+            
+            // Configure smoother motor behavior for better visual quality
+            var motorConfig = new MotorCharacterConfig
+            {
+                MotorStrength = 0.15f,  // Reduced from 0.3 for smoother acceleration (15% per frame)
+                HeightCorrectionStrength = 8.0f,  // Slightly reduced from 10.0 for gentler vertical correction
+                VerticalDamping = 0.7f,  // Increased from 0.5 for less bouncing
+                IdleVerticalDamping = 0.3f  // Increased from 0.2 for more stable idle
+            };
+            
+            var motorController = new MotorCharacterController(physicsWorld, motorConfig);
             var movementController = new MovementController(physicsWorld, pathfindingService, agentConfig, pathfindingConfig, motorController);
             var agentEntities = new List<PhysicsEntity>();
 
@@ -374,12 +384,12 @@ public static class TestEnhancedShowcase
             // ═══════════════════════════════════════════════════════════
             currentPhase = "PHASE 5: SIMULATION EXECUTION";
             Console.WriteLine("══════════════════════════════════════════════════════════════");
-            Console.WriteLine("PHASE 5: RUNNING SIMULATION (15 seconds, 940 steps)");
+            Console.WriteLine("PHASE 5: RUNNING SIMULATION (15 seconds, 1875 steps @ 125fps)");
             Console.WriteLine("══════════════════════════════════════════════════════════════");
             Console.WriteLine();
 
             // SETTLING PHASE: Only needed for dynamic obstacles (NPCs), not kinematic agents
-            Console.WriteLine("Phase 5a: Settling dynamic obstacles (3 seconds, 190 steps)...");
+            Console.WriteLine("Phase 5a: Settling dynamic obstacles (3 seconds, 375 steps @ 125fps)...");
             
             // Store agent EXPECTED positions based on validated navmesh surface
             // CRITICAL FIX: Use the validated navmesh Y, not the physics spawn Y
@@ -399,10 +409,10 @@ public static class TestEnhancedShowcase
             }
             Console.WriteLine();
             
-            for (int i = 0; i < 190; i++)
+            for (int i = 0; i < 375; i++)
             {
                 // Only update physics to let NPCs fall and settle
-                physicsWorld.Update(0.016f);
+                physicsWorld.Update(0.008f);
                 
                 // CRITICAL FIX: Keep agents at EXACT expected positions during settling
                 // This ensures agents spawn on the navmesh surface, not floating above it
@@ -529,12 +539,12 @@ public static class TestEnhancedShowcase
                         
                         if (pathValid)
                         {
-                            // IMPROVED: Increase speed from 3.0 to 5.0 for faster goal reaching
+                            // Movement speed: 4.5 m/s (balanced between smooth and responsive)
                             // Pass agent height and radius to MovementController for proper Y positioning
                             var moveRequest = new MovementRequest(
                                 scenario.EntityId, 
                                 scenario.Goal, 
-                                maxSpeed: 5.0f, 
+                                maxSpeed: 4.5f,  // Good balance of speed and smoothness
                                 agentHeight: agentConfig.Height,
                                 agentRadius: agentConfig.Radius
                             );
@@ -578,17 +588,17 @@ public static class TestEnhancedShowcase
             Console.WriteLine();
 
             // MOVEMENT PHASE: Now run simulation with active pathfinding
-            Console.WriteLine("Phase 5c: Active movement phase (15 seconds, 937 steps)...");
-            // IMPROVED: Increase simulation time from 750 to 937 steps (12s to 15s) for longer goals
-            int steps = 937;
-            int reportInterval = 187; // Report every ~3 seconds
+            Console.WriteLine("Phase 5c: Active movement phase (15 seconds, 1875 steps @ 125fps)...");
+            // Doubled step count due to higher physics rate (0.008s timestep = 125fps)
+            int steps = 1875;  // 15 seconds at 125fps for smoother motion
+            int reportInterval = 375; // Report every ~3 seconds
             var simulationStopwatch = Stopwatch.StartNew();
 
             for (int i = 0; i < steps; i++)
             {
                 currentStep = i + 1;
-                movementController.UpdateMovement(0.016f);
-                physicsWorld.Update(0.016f);
+                movementController.UpdateMovement(0.008f);
+                physicsWorld.Update(0.008f);
                 
                 // FIXED: Keep failed agents stationary AND maintain correct Y position
                 // Failed agents have gravity enabled but no pathfinding, so they need explicit Y correction
@@ -637,18 +647,60 @@ public static class TestEnhancedShowcase
                         if (distToGoal < 1.5f && !metric.ReachedGoal)
                         {
                             metric.ReachedGoal = true;
-                            metric.TimeToGoal = i * 0.016f;
+                            metric.TimeToGoal = i * 0.008f;
                             metrics.AgentsReachedGoal++;
                             Console.WriteLine($"    🎯 {metric.Name} reached goal at {metric.TimeToGoal:F1}s");
                         }
                     }
                 }
 
-                // Broadcast visualization state
+                // Broadcast visualization state with agent waypoints
                 var mainAgentId = agentEntities.Count > 0 ? agentEntities[0].EntityId : 0;
                 var state = SimulationStateBuilder.BuildFromPhysicsWorld(
                     physicsWorld, navMeshData, null, mainAgentId
                 );
+                
+                // Add waypoints for all agents
+                int totalPathsAdded = 0;
+                int totalAgentsChecked = 0;
+                foreach (var agent in agentEntities)
+                {
+                    totalAgentsChecked++;
+                    var waypoints = movementController.GetWaypoints(agent.EntityId);
+                    var currentIndex = movementController.GetCurrentWaypointIndex(agent.EntityId);
+                    
+                    // Debug first time through
+                    if (i == 0)
+                    {
+                        Console.WriteLine($"[Showcase] Agent {agent.EntityId}: waypoints={waypoints?.Count ?? -1}, index={currentIndex}");
+                    }
+                    
+                    if (waypoints != null && waypoints.Count > 0)
+                    {
+                        state.AgentPaths.Add(new PathData
+                        {
+                            EntityId = agent.EntityId,
+                            Waypoints = waypoints.Select(wp => new[] { wp.X, wp.Y, wp.Z }).ToList(),
+                            PathLength = 0 // Not critical for visualization
+                        });
+                        totalPathsAdded++;
+                    }
+                }
+                
+                // Debug: Log every 50 steps to see if paths are being sent
+                if (i % 50 == 0)
+                {
+                    Console.WriteLine($"[Showcase] Step {i}: Checked {totalAgentsChecked} agents, sending {totalPathsAdded} agent paths to Unity");
+                    if (totalPathsAdded > 0)
+                    {
+                        Console.WriteLine($"  Sample: Agent {state.AgentPaths[0].EntityId} has {state.AgentPaths[0].Waypoints.Count} waypoints");
+                    }
+                    else if (totalAgentsChecked > 0)
+                    {
+                        Console.WriteLine($"  No agents have waypoints yet - they may not have started moving");
+                    }
+                }
+                
                 vizServer.BroadcastState(state);
 
                 // Extra detailed tracking for Agent-3 every 30 steps (~0.5s)
@@ -695,7 +747,7 @@ public static class TestEnhancedShowcase
                 if (i % reportInterval == 0 || i == steps - 1)
                 {
                     Console.WriteLine($"─────────────────────────────────────────────────────────────");
-                    Console.WriteLine($"Step {i + 1}/{steps} ({(float)(i + 1) / steps * 100:F0}% complete) - Time: {(i + 1) * 0.016f:F1}s");
+                    Console.WriteLine($"Step {i + 1}/{steps} ({(float)(i + 1) / steps * 100:F0}% complete) - Time: {(i + 1) * 0.008f:F1}s");
                     Console.WriteLine($"─────────────────────────────────────────────────────────────");
                     
                     int reachedCount = agentMetrics.Count(m => m.ReachedGoal);
