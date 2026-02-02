@@ -675,6 +675,24 @@ class Program
                 
                 TestNavMeshWaypointValidity.Run();
             }
+            else if (args.Length > 0 && args[0].ToLower() == "navmesh-accuracy")
+            {
+                // Run the navmesh accuracy diagnostic
+                Console.WriteLine("[Info] Running NAVMESH ACCURACY DIAGNOSTIC\n");
+                Console.WriteLine("[Info] This diagnostic compares:\n");
+                Console.WriteLine("[Info]   1. NavMesh surface Y positions\n");
+                Console.WriteLine("[Info]   2. Actual mesh surface Y at the same XZ coordinates\n");
+                Console.WriteLine("[Info]   3. Character feet positioning vs ground\n");
+                Console.WriteLine("[Info] This will identify if navmesh heights match the actual mesh.\n");
+                
+                string? meshPath = null;
+                if (args.Length > 1)
+                {
+                    meshPath = args[1];
+                }
+                
+                TestNavMeshAccuracy.Run(meshPath);
+            }
             else
             {
                 // Run all tests with visualization
@@ -694,6 +712,7 @@ class Program
                 Console.WriteLine("[Info]   Use 'dotnet run -- pathfind <x1> <y1> <z1> <x2> <y2> <z2>' for custom coordinates");
                 Console.WriteLine("[Info]   Use 'dotnet run -- path-validation [meshPath]' to test path validation system");
                 Console.WriteLine("[Info]   Use 'dotnet run -- navmesh-validity' to verify waypoint validity vs segment traversability");
+                Console.WriteLine("[Info]   Use 'dotnet run -- navmesh-accuracy [meshPath]' to compare navmesh heights with actual mesh surface");
                 Console.WriteLine("[Info]   Use 'dotnet run -- phase1 [meshPath]' for diagnostic analysis of Agent-3 falling issue");
                 Console.WriteLine("[Info]   Use '--export-navmesh [path]' to export generated NavMesh to OBJ file\n");
                 TestPhysicsCollision(vizServer);

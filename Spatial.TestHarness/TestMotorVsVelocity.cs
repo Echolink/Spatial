@@ -212,10 +212,12 @@ public static class TestMotorVsVelocity
             {
                 var motorConfig = new MotorCharacterConfig
                 {
-                    MotorStrength = 0.3f,
-                    HeightCorrectionStrength = 10.0f,
-                    VerticalDamping = 0.5f,
-                    StabilityThreshold = 0.2f
+                    MotorStrength = 0.5f,  // INCREASED: More aggressive correction
+                    HeightCorrectionStrength = 15.0f,  // INCREASED: Much stronger height correction
+                    MaxVerticalCorrection = 8.0f,  // INCREASED: Allow faster corrections
+                    HeightErrorTolerance = 0.1f,  // TIGHTENED: Apply damping within 10cm
+                    VerticalDamping = 0.9f,  // INCREASED: Reduce bounce/oscillation
+                    StabilityThreshold = 0.15f  // TIGHTENED: Faster recovery
                 };
                 motorController = new MotorCharacterController(physicsWorld, motorConfig);
                 Console.WriteLine("✓ Motor-based character controller initialized");
@@ -281,10 +283,29 @@ public static class TestMotorVsVelocity
                 agentConfig.Radius, agentConfig.Height, agentMass
             );
             
+            // CRITICAL: Calculate capsule offset so feet are on the ground
+            // startPos.Y represents the navmesh surface (where feet should be)
+            // Physics engine expects the capsule CENTER position
+            // Capsule total height = Height + 2*Radius (includes hemispherical caps)
+            // So capsule half-height = (Height/2) + Radius
+            float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+            var spawnPosition = new Vector3(
+                startPos.X,
+                startPos.Y + capsuleHalfHeight,  // Offset up so feet are at surface
+                startPos.Z
+            );
+            
+            Console.WriteLine($"  Spawn calculations:");
+            Console.WriteLine($"    NavMesh surface Y:     {startPos.Y:F3}m (where feet should be)");
+            Console.WriteLine($"    Capsule half-height:   {capsuleHalfHeight:F3}m");
+            Console.WriteLine($"    Physics center Y:      {spawnPosition.Y:F3}m");
+            Console.WriteLine($"    Expected feet Y:       {(spawnPosition.Y - capsuleHalfHeight):F3}m (should match surface)");
+            Console.WriteLine();
+            
             var agent = physicsWorld.RegisterEntityWithInertia(
                 entityId: 103,
                 entityType: EntityType.Player,
-                position: startPos,
+                position: spawnPosition,
                 shape: agentShape,
                 inertia: agentInertia,
                 isStatic: false,

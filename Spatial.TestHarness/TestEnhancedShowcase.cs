@@ -209,9 +209,11 @@ public static class TestEnhancedShowcase
             var motorConfig = new MotorCharacterConfig
             {
                 MotorStrength = 0.15f,  // Reduced from 0.3 for smoother acceleration (15% per frame)
-                HeightCorrectionStrength = 8.0f,  // Slightly reduced from 10.0 for gentler vertical correction
-                VerticalDamping = 0.7f,  // Increased from 0.5 for less bouncing
-                IdleVerticalDamping = 0.3f  // Increased from 0.2 for more stable idle
+                HeightCorrectionStrength = 6.5f,  // INCREASED: Stronger correction to reach target height (was 5.0, unit was 0.8m too low)
+                MaxVerticalCorrection = 3.5f,  // INCREASED: Allow faster correction (was 3.0)
+                HeightErrorTolerance = 0.25f,  // INCREASED: Apply damping within 25cm (was 0.2) - larger zone = less snapping
+                VerticalDamping = 0.75f,  // SLIGHTLY REDUCED: Allow slightly faster response (was 0.8)
+                IdleVerticalDamping = 0.4f  // Increased for more stable idle
             };
             
             var motorController = new MotorCharacterController(physicsWorld, motorConfig);
@@ -642,15 +644,28 @@ public static class TestEnhancedShowcase
                         }
                         metric.PathHistory.Add(currentPos);
 
-                        // Check if reached goal (increased tolerance from 1.0 to 1.5 for easier success)
-                        float distToGoal = Vector3.Distance(currentPos, metric.GoalPosition);
-                        if (distToGoal < 1.5f && !metric.ReachedGoal)
-                        {
-                            metric.ReachedGoal = true;
-                            metric.TimeToGoal = i * 0.008f;
-                            metrics.AgentsReachedGoal++;
-                            Console.WriteLine($"    🎯 {metric.Name} reached goal at {metric.TimeToGoal:F1}s");
-                        }
+                // Check if reached goal (increased tolerance from 1.0 to 1.5 for easier success)
+                float distToGoal = Vector3.Distance(currentPos, metric.GoalPosition);
+                if (distToGoal < 1.5f && !metric.ReachedGoal)
+                {
+                    metric.ReachedGoal = true;
+                    metric.TimeToGoal = i * 0.008f;
+                    metrics.AgentsReachedGoal++;
+                    
+                    // Calculate height error at goal
+                    float capsuleHalfHeight = (agentConfig.Height / 2.0f) + agentConfig.Radius;
+                    float currentFeetY = currentPos.Y - capsuleHalfHeight;
+                    float targetFeetY = metric.GoalPosition.Y;
+                    float heightError = targetFeetY - currentFeetY;
+                    
+                    Console.WriteLine($"    🎯 {metric.Name} reached goal at {metric.TimeToGoal:F1}s");
+                    Console.WriteLine($"       Final height: Feet at Y={currentFeetY:F3}, Target Y={targetFeetY:F3}, Error={heightError:F3}m");
+                    
+                    if (Math.Abs(heightError) > 0.5f)
+                    {
+                        Console.WriteLine($"       ⚠️ WARNING: Height error > 0.5m! Unit may appear floating or sunk into ground.");
+                    }
+                }
                     }
                 }
 

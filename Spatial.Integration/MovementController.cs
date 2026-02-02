@@ -44,7 +44,9 @@ public class MovementController
     /// <summary>
     /// Event fired when a path becomes blocked
     /// </summary>
+#pragma warning disable CS0067 // Event is never used (reserved for future path validation)
     public event Action<int>? OnPathBlocked;
+#pragma warning restore CS0067
     
     /// <summary>
     /// Event fired when a path is replanned
@@ -617,26 +619,33 @@ public class MovementController
             // Check for edge before applying movement
             // CRITICAL: Only stop if edge is NOT part of the planned path
             // If the path ahead requires going down/up (ramp/slope), trust the pathfinding
-            bool isExpectedElevationChange = false;
-            if (state.CurrentWaypointIndex < state.Waypoints.Count)
+            // OPTIMIZATION: Only check edge every 10 frames to reduce navmesh query overhead
+            state.EdgeCheckFrameCounter++;
+            if (state.EdgeCheckFrameCounter >= 10)
             {
-                // Check elevation change from current position to target waypoint
-                float elevationChange = Math.Abs(targetWaypoint.Y - (currentPosition.Y - agentHalfHeight));
-                isExpectedElevationChange = elevationChange > 2.0f; // Path expects significant elevation change
+                state.EdgeCheckFrameCounter = 0;
                 
-                // Also check if final destination requires elevation change
-                var finalWaypoint = state.Waypoints[^1];
-                float totalElevationChange = Math.Abs(finalWaypoint.Y - (currentPosition.Y - agentHalfHeight));
-                if (totalElevationChange > 3.0f)
-                    isExpectedElevationChange = true;
-            }
-            
-            if (!isExpectedElevationChange && WouldFallOffEdge(entity, currentPosition, desiredVelocity, state.AgentRadius))
-            {
-                Console.WriteLine($"[MovementController] Agent {entity.EntityId} at unexpected edge - stopping");
-                _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
-                ReplanPath(entity, state, currentPosition);
-                return;
+                bool isExpectedElevationChange = false;
+                if (state.CurrentWaypointIndex < state.Waypoints.Count)
+                {
+                    // Check elevation change from current position to target waypoint
+                    float elevationChange = Math.Abs(targetWaypoint.Y - (currentPosition.Y - agentHalfHeight));
+                    isExpectedElevationChange = elevationChange > 2.0f; // Path expects significant elevation change
+                    
+                    // Also check if final destination requires elevation change
+                    var finalWaypoint = state.Waypoints[^1];
+                    float totalElevationChange = Math.Abs(finalWaypoint.Y - (currentPosition.Y - agentHalfHeight));
+                    if (totalElevationChange > 3.0f)
+                        isExpectedElevationChange = true;
+                }
+                
+                if (!isExpectedElevationChange && WouldFallOffEdge(entity, currentPosition, desiredVelocity, state.AgentRadius))
+                {
+                    Console.WriteLine($"[MovementController] Agent {entity.EntityId} at unexpected edge - stopping");
+                    _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+                    ReplanPath(entity, state, currentPosition);
+                    return;
+                }
             }
             
             // CRITICAL: Handle slope/ramp navigation properly
@@ -648,59 +657,125 @@ public class MovementController
             var finalVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
             _physicsWorld.SetEntityVelocity(entity, finalVelocity);
             
-            // CRITICAL FIX: Always apply grounding, not just on slopes!
-            // Even on flat terrain, gravity can cause sinking
-            Vector3 prevPos;
-            if (state.CurrentWaypointIndex > 0)
+            // CRITICAL FIX: Query navmesh at agent's current XZ position
+            // This gives us the actual surface height where the agent is standing
+            // rather than interpolating between sparse waypoints
+            
+            // SLOPE-AWARE: Use different tolerance and behavior on slopes vs flat ground
+            // On slopes, allow more natural deviation to prevent struggle
+            float heightTolerance = isOnSlope ? 0.15f : 0.05f; // 15cm on slopes, 5cm on flat
+            
+            float targetY;
+            float currentGroundY = currentPosition.Y - agentHalfHeight;
+            
+            // On steep slopes, reduce grounding frequency to allow natural physics
+            // Only apply correction every few frames on slopes
+            if (isOnSlope)
             {
-                prevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
+                state.SlopeGroundingFrameCounter++;
+                if (state.SlopeGroundingFrameCounter % 5 != 0)
+                {
+                    // Skip grounding this frame - let physics handle slope naturally
+                    return;
+                }
+            }
+            
+            // Query navmesh at current XZ position with small search extents
+            var currentXZ = new Vector3(currentPosition.X, currentPosition.Y, currentPosition.Z);
+            var smallSearchExtents = new Vector3(1.0f, 2.0f, 1.0f); // Small horizontal, larger vertical
+            var surfaceAtCurrentPos = _pathfindingService.FindNearestValidPosition(currentXZ, smallSearchExtents);
+            
+            if (surfaceAtCurrentPos != null)
+            {
+                // Use the actual navmesh surface Y at this XZ position
+                targetY = surfaceAtCurrentPos.Value.Y + agentHalfHeight;
+                
+                // DAMPING: Only apply grounding if we're far enough from target
+                float heightError = Math.Abs(currentPosition.Y - targetY);
+                if (heightError < heightTolerance)
+                {
+                    // Already close enough - don't apply grounding force
+                    // This prevents constant micro-adjustments and stuttering
+                    return;
+                }
             }
             else
             {
-                // First waypoint - use agent's starting ground position
-                prevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
+                // Fallback: interpolate between waypoints if navmesh query fails
+                Vector3 prevPos;
+                if (state.CurrentWaypointIndex > 0)
+                {
+                    prevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
+                }
+                else
+                {
+                    prevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
+                }
+                
+                float totalHorizontalDist = new Vector2(
+                    targetWaypoint.X - prevPos.X,
+                    targetWaypoint.Z - prevPos.Z
+                ).Length();
+                
+                float coveredHorizontalDist = new Vector2(
+                    currentPosition.X - prevPos.X,
+                    currentPosition.Z - prevPos.Z
+                ).Length();
+                
+                float progress = totalHorizontalDist > 0.1f ? coveredHorizontalDist / totalHorizontalDist : 0.0f;
+                progress = Math.Clamp(progress, 0.0f, 1.0f);
+                
+                float interpolatedGroundY = prevPos.Y + (targetWaypoint.Y - prevPos.Y) * progress;
+                targetY = interpolatedGroundY + agentHalfHeight;
+                
+                // Apply damping to interpolation too
+                float heightError = Math.Abs(currentPosition.Y - targetY);
+                if (heightError < heightTolerance)
+                {
+                    return;
+                }
             }
             
-            // Calculate XZ progress from previous waypoint to target
-            float totalHorizontalDist = new Vector2(
-                targetWaypoint.X - prevPos.X,
-                targetWaypoint.Z - prevPos.Z
-            ).Length();
-            
-            float coveredHorizontalDist = new Vector2(
-                currentPosition.X - prevPos.X,
-                currentPosition.Z - prevPos.Z
-            ).Length();
-            
-            float progress = totalHorizontalDist > 0.1f ? coveredHorizontalDist / totalHorizontalDist : 0.0f;
-            progress = Math.Clamp(progress, 0.0f, 1.0f);
-            
-            // Interpolate ground Y based on XZ progress
-            float interpolatedGroundY = prevPos.Y + (targetWaypoint.Y - prevPos.Y) * progress;
-            float targetY = interpolatedGroundY + agentHalfHeight;
-            
-            // ALWAYS apply grounding force to maintain correct Y position
+            // Apply grounding force only if height error is significant
             _characterController.ApplyGroundingForce(entity, desiredVelocity, targetY, agentHalfHeight);
         }
         else if (_characterController.IsRecovering(entity))
         {
             // CRITICAL: Apply grounding even when recovering to prevent sinking
-            // Calculate target Y based on current waypoint
-            Vector3 recoverPrevPos;
-            if (state.CurrentWaypointIndex > 0)
-            {
-                recoverPrevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
-            }
-            else
-            {
-                recoverPrevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
-            }
+            // Query navmesh at current XZ position to get actual surface height
+            const float heightTolerance = 0.05f; // 5cm tolerance
             
-            if (state.CurrentWaypointIndex < state.Waypoints.Count)
+            var currentXZ = new Vector3(currentPosition.X, currentPosition.Y, currentPosition.Z);
+            var smallSearchExtents = new Vector3(1.0f, 2.0f, 1.0f);
+            var surfaceAtCurrentPos = _pathfindingService.FindNearestValidPosition(currentXZ, smallSearchExtents);
+            
+            if (surfaceAtCurrentPos != null)
             {
+                // Use actual navmesh surface Y
+                float targetY = surfaceAtCurrentPos.Value.Y + agentHalfHeight;
+                
+                // Apply damping - only correct if error is significant
+                float heightError = Math.Abs(currentPosition.Y - targetY);
+                if (heightError >= heightTolerance)
+                {
+                    _characterController.ApplyGroundingForce(entity, Vector3.Zero, targetY, agentHalfHeight);
+                }
+            }
+            else if (state.CurrentWaypointIndex < state.Waypoints.Count)
+            {
+                // Fallback: interpolate between waypoints
+                Vector3 recoverPrevPos;
+                if (state.CurrentWaypointIndex > 0)
+                {
+                    recoverPrevPos = state.Waypoints[state.CurrentWaypointIndex - 1];
+                }
+                else
+                {
+                    recoverPrevPos = new Vector3(currentPosition.X, currentPosition.Y - agentHalfHeight, currentPosition.Z);
+                }
+                
                 var recoverTargetWaypoint = state.Waypoints[state.CurrentWaypointIndex];
                 
-                // Calculate XZ progress
                 float totalHorizontalDist = new Vector2(
                     recoverTargetWaypoint.X - recoverPrevPos.X,
                     recoverTargetWaypoint.Z - recoverPrevPos.Z
@@ -714,12 +789,15 @@ public class MovementController
                 float progress = totalHorizontalDist > 0.1f ? coveredHorizontalDist / totalHorizontalDist : 0.0f;
                 progress = Math.Clamp(progress, 0.0f, 1.0f);
                 
-                // Interpolate ground Y
                 float interpolatedGroundY = recoverPrevPos.Y + (recoverTargetWaypoint.Y - recoverPrevPos.Y) * progress;
                 float targetY = interpolatedGroundY + agentHalfHeight;
                 
-                // Apply grounding to prevent further sinking while recovering
-                _characterController.ApplyGroundingForce(entity, Vector3.Zero, targetY, agentHalfHeight);
+                // Apply damping
+                float heightError = Math.Abs(currentPosition.Y - targetY);
+                if (heightError >= heightTolerance)
+                {
+                    _characterController.ApplyGroundingForce(entity, Vector3.Zero, targetY, agentHalfHeight);
+                }
             }
             
             // Wait for stability after landing
@@ -1059,4 +1137,10 @@ public class MovementController
         public bool IsCompleted { get; set; } = false;
         public bool IsAvoidingCollision { get; set; } = false;
         public bool HasDetourWaypoint { get; set; } = false;
+        
+        // Frame counter for reducing edge check frequency
+        public int EdgeCheckFrameCounter { get; set; } = 0;
+        
+        // Frame counter for slope grounding frequency
+        public int SlopeGroundingFrameCounter { get; set; } = 0;
     }
