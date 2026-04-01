@@ -433,11 +433,15 @@ public static class TestMotorVsVelocity
                     var waypoints = movementController.GetWaypoints(agent.EntityId);
                     if (waypoints != null && waypoints.Count > 0)
                     {
+                        var originalTarget = movementController.GetOriginalTargetPosition(agent.EntityId);
+                        var snappedTarget = movementController.GetActualTargetPosition(agent.EntityId);
                         state.AgentPaths.Add(new PathData
                         {
                             EntityId = agent.EntityId,
                             Waypoints = waypoints.Select(wp => new[] { wp.X, wp.Y, wp.Z }).ToList(),
-                            PathLength = 0
+                            PathLength = 0,
+                            OriginalTarget = originalTarget.HasValue ? new[] { originalTarget.Value.X, originalTarget.Value.Y, originalTarget.Value.Z } : null,
+                            SnappedTarget = snappedTarget.HasValue ? new[] { snappedTarget.Value.X, snappedTarget.Value.Y, snappedTarget.Value.Z } : null
                         });
                         
                         // Debug log first broadcast

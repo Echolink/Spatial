@@ -126,7 +126,31 @@ public class NavMeshBuilder
         
         return navMeshData;
     }
-    
+
+    /// <summary>
+    /// Generates a tile-based NavMesh from the static geometry in the physics world.
+    /// Enables runtime tile updates via <see cref="PathfindingService.RebuildNavMeshRegion"/>.
+    /// </summary>
+    /// <param name="agentConfig">Agent constraints (single source of truth).</param>
+    /// <param name="navConfig">Tile configuration.</param>
+    public NavMeshData BuildTiledNavMeshDirect(AgentConfig agentConfig, NavMeshConfiguration navConfig)
+    {
+        var (vertices, indices) = ExtractRawMeshGeometry();
+
+        var verticesArray = new float[vertices.Count * 3];
+        for (int i = 0; i < vertices.Count; i++)
+        {
+            verticesArray[i * 3]     = vertices[i].X;
+            verticesArray[i * 3 + 1] = vertices[i].Y;
+            verticesArray[i * 3 + 2] = vertices[i].Z;
+        }
+
+        var indicesArray = indices.ToArray();
+
+        return _navMeshGenerator.GenerateTiledNavMesh(verticesArray, indicesArray, agentConfig, navConfig);
+    }
+
+
     /// <summary>
     /// Extracts raw triangle mesh geometry from all mesh entities without physics processing.
     /// This preserves original mesh data for direct navmesh generation.

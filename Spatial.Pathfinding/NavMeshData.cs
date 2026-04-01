@@ -9,6 +9,7 @@ namespace Spatial.Pathfinding;
 /// <summary>
 /// Container for navigation mesh data.
 /// The NavMesh is generated once and reused for multiple pathfinding queries.
+/// When <see cref="IsMultiTile"/> is true individual tiles can be rebuilt at runtime.
 /// </summary>
 public class NavMeshData
 {
@@ -17,16 +18,40 @@ public class NavMeshData
     /// This is what we query for paths.
     /// </summary>
     public DtNavMesh NavMesh { get; }
-    
+
     /// <summary>
     /// Query object for finding paths on the NavMesh.
+    /// Recreated automatically after tile updates via <see cref="InvalidateQuery"/>.
     /// </summary>
-    public DtNavMeshQuery Query { get; }
-    
-    public NavMeshData(DtNavMesh navMesh, DtNavMeshQuery query)
+    public DtNavMeshQuery Query { get; private set; }
+
+    /// <summary>
+    /// True if the NavMesh was built with multi-tile support (EnableTileUpdates = true).
+    /// </summary>
+    public bool IsMultiTile { get; }
+
+    /// <summary>
+    /// World-space tile size used during multi-tile generation.
+    /// Zero for monolithic (single-tile) meshes.
+    /// </summary>
+    public float TileSize { get; }
+
+    public NavMeshData(DtNavMesh navMesh, DtNavMeshQuery query,
+        bool isMultiTile = false, float tileSize = 0f)
     {
         NavMesh = navMesh;
         Query = query;
+        IsMultiTile = isMultiTile;
+        TileSize = tileSize;
+    }
+
+    /// <summary>
+    /// Recreates the <see cref="DtNavMeshQuery"/> after a tile has been added or removed.
+    /// Call this after every <see cref="DtNavMesh.AddTile"/> or <see cref="DtNavMesh.RemoveTile"/>.
+    /// </summary>
+    public void InvalidateQuery()
+    {
+        Query = new DtNavMeshQuery(NavMesh);
     }
     
     /// <summary>

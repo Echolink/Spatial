@@ -13,12 +13,13 @@ namespace Spatial.Pathfinding;
     public class Pathfinder
     {
         private readonly NavMeshData _navMeshData;
-        
+        private readonly NavMeshGenerator _generator = new();
+
         /// <summary>
         /// Gets the navigation mesh data (exposed for spawn validation).
         /// </summary>
         public NavMeshData NavMeshData => _navMeshData;
-        
+
         /// <summary>
         /// Creates a new pathfinder using the provided navigation mesh.
         /// </summary>
@@ -136,15 +137,117 @@ namespace Spatial.Pathfinding;
     public bool IsValidPosition(Vector3 position, Vector3 extents)
     {
         var query = _navMeshData.Query;
-        
+
         // Convert Vector3 to RcVec3f
         var posVec = new RcVec3f(position.X, position.Y, position.Z);
         var extentsVec = new RcVec3f(extents.X, extents.Y, extents.Z);
-        
+
         // Find nearest polygon
         var filter = new DtQueryDefaultFilter();
         query.FindNearestPoly(posVec, extentsVec, filter, out var polyRef, out var nearestPt, out var found);
-        
+
         return found;
+    }
+
+    /// <summary>
+    /// Rebuilds the tile at position (<paramref name="tileX"/>, <paramref name="tileZ"/>) using
+    /// the supplied geometry for that tile's world region.
+    ///
+    /// Only works when the NavMesh was generated with <see cref="NavMeshData.IsMultiTile"/> = true.
+    /// Callers should follow up with path revalidation (e.g., via
+    /// <see cref="Integration.PathfindingService.RebuildNavMeshRegion"/>) so active paths
+    /// through the rebuilt tile are rechecked.
+    /// </summary>
+    /// <param name="tileX">Tile column index (world X / TileSize, floored).</param>
+    /// <param name="tileZ">Tile row index (world Z / TileSize, floored).</param>
+    /// <param name="tileVertices">Vertex positions (x,y,z triplets) for geometry in this tile.</param>
+    /// <param name="tileIndices">Triangle indices into <paramref name="tileVertices"/>.</param>
+    /// <param name="agentConfig">Agent constraints used when building the replacement tile.</param>
+    /// <param name="navConfig">Tile configuration used when the NavMesh was originally created.</param>
+    /// <returns>True if the tile was rebuilt successfully.</returns>
+    public bool RebuildTile(int tileX, int tileZ,
+        float[] tileVertices, int[] tileIndices,
+        AgentConfig agentConfig, NavMeshConfiguration navConfig)
+    {
+        if (!_navMeshData.IsMultiTile)
+        {
+            Console.WriteLine("[Pathfinder] RebuildTile: NavMesh was not built with EnableTileUpdates=true. Skipping.");
+            return false;
+        }
+
+        if (tileVertices.Length == 0 || tileIndices.Length == 0)
+        {
+            Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): no geometry provided, removing tile only.");
+        }
+
+        // Remove existing tile (if any)
+        long existingRef = _navMeshData.NavMesh.GetTileRefAt(tileX, tileZ, 0);
+        if (existingRef != 0)
+        {
+            _navMeshData.NavMesh.RemoveTile(existingRef);
+            Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): removed old tile");
+        }
+
+        if (tileVertices.Length == 0 || tileIndices.Length == 0)
+        {
+            _navMeshData.InvalidateQuery();
+            return true; // Tile removed, nothing to add
+        }
+
+        // Build new tile
+        float cellSize = agentConfig.Radius / 2.0f;
+        float cellHeight = cellSize / 2.0f;
+
+        var (bmin, bmax) = CalculateTileBounds(tileX, tileZ, navConfig.TileSize, agentConfig);
+        var geomProvider = new SimpleInputGeomProvider(tileVertices, tileIndices);
+        var walkableAreaMod = new DotRecast.Recast.RcAreaModification(0x3f);
+
+        var config = new DotRecast.Recast.RcConfig(
+            DotRecast.Recast.RcPartition.WATERSHED, cellSize, cellHeight,
+            agentConfig.MaxSlope, agentConfig.Height, agentConfig.Radius, agentConfig.MaxClimb,
+            1, 4, agentConfig.Radius * 8.0f, 1.3f, 6,
+            cellSize * 6.0f, cellHeight,
+            true, true, true, walkableAreaMod, true);
+
+        var builderConfig = new DotRecast.Recast.RcBuilderConfig(config, bmin, bmax);
+        var builder = new DotRecast.Recast.RcBuilder();
+        var buildResult = builder.Build(geomProvider, builderConfig, keepInterResults: false);
+
+        if (buildResult?.Mesh == null || buildResult.Mesh.npolys == 0)
+        {
+            Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): build produced 0 polygons");
+            _navMeshData.InvalidateQuery();
+            return true; // Tile is now empty (geometry was removed)
+        }
+
+        var tileData = _generator.BuildTileData(buildResult, config, agentConfig, tileX, tileZ);
+        if (tileData == null)
+        {
+            Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): BuildTileData returned null");
+            _navMeshData.InvalidateQuery();
+            return false;
+        }
+
+        _navMeshData.NavMesh.AddTile(tileData, 0, 0, out _);
+        _navMeshData.InvalidateQuery();
+
+        Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): success ({buildResult.Mesh.npolys} polys)");
+        return true;
+    }
+
+    /// <summary>
+    /// Converts tile coordinates to the Recast bounding box used during generation.
+    /// </summary>
+    private static (RcVec3f bmin, RcVec3f bmax) CalculateTileBounds(
+        int tileX, int tileZ, float tileSize, AgentConfig agentConfig)
+    {
+        // We don't store the world origin, so use (0,0,0) as baseline.
+        // Tile coords are from CalcTileLoc which is relative to the NavMesh origin.
+        // This works correctly when the game server uses CalcTileLoc to get tile coords.
+        var bmin = new RcVec3f(tileX * tileSize, -1000f, tileZ * tileSize);
+        var bmax = new RcVec3f((tileX + 1) * tileSize, 1000f, (tileZ + 1) * tileSize);
+        bmin.Y -= agentConfig.CellHeight;
+        bmax.Y += agentConfig.Height * 2f;
+        return (bmin, bmax);
     }
 }

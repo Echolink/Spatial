@@ -311,5 +311,67 @@ public class PathfindingService
         Console.WriteLine($"[PathfindingService]   → No navmesh found anywhere in search extents");
         return null;
     }
+
+    /// <summary>
+    /// Rebuilds all NavMesh tiles that overlap the world-space region defined by
+    /// <paramref name="center"/> ± <paramref name="radius"/> using the provided geometry.
+    ///
+    /// Typical use cases:
+    /// <list type="bullet">
+    ///   <item>A door opens or closes (pass the door-region geometry)</item>
+    ///   <item>A bridge collapses (pass empty arrays to erase walkable area)</item>
+    ///   <item>New terrain is added at runtime</item>
+    /// </list>
+    ///
+    /// Requires the NavMesh to have been generated with
+    /// <see cref="NavMeshConfiguration.EnableTileUpdates"/> = true.
+    /// After this call, active agents whose paths cross the rebuilt region should be
+    /// replanned; this happens automatically on the next <c>ValidateAndReplanIfNeeded</c>
+    /// tick if <see cref="PathfindingConfiguration.PathValidationLookaheadWaypoints"/> &gt; 0.
+    /// </summary>
+    /// <param name="center">World-space center of the region to rebuild.</param>
+    /// <param name="radius">Radius (meters) of the region to rebuild.</param>
+    /// <param name="newVertices">
+    ///   Complete replacement geometry (x,y,z triplets) for this region.
+    ///   Pass an empty array to erase walkable area (e.g., bridge collapse).
+    /// </param>
+    /// <param name="newIndices">Triangle indices into <paramref name="newVertices"/>.</param>
+    /// <param name="navConfig">
+    ///   NavMesh tile configuration — must match the configuration used during generation.
+    /// </param>
+    /// <returns>Number of tiles rebuilt (0 if NavMesh was not built with tile support).</returns>
+    public int RebuildNavMeshRegion(Vector3 center, float radius,
+        float[] newVertices, int[] newIndices,
+        NavMeshConfiguration navConfig)
+    {
+        var navMeshData = _pathfinder.NavMeshData;
+        if (!navMeshData.IsMultiTile)
+        {
+            Console.WriteLine("[PathfindingService] RebuildNavMeshRegion: NavMesh is monolithic. " +
+                "Rebuild NavMesh with NavMeshConfiguration.EnableTileUpdates=true to use this feature.");
+            return 0;
+        }
+
+        float tileSize = navMeshData.TileSize;
+
+        // Determine tile range that overlaps the AABB of the sphere
+        int txMin = (int)Math.Floor((center.X - radius) / tileSize);
+        int txMax = (int)Math.Floor((center.X + radius) / tileSize);
+        int tzMin = (int)Math.Floor((center.Z - radius) / tileSize);
+        int tzMax = (int)Math.Floor((center.Z + radius) / tileSize);
+
+        int rebuilt = 0;
+        for (int tz = tzMin; tz <= tzMax; tz++)
+        {
+            for (int tx = txMin; tx <= txMax; tx++)
+            {
+                bool ok = _pathfinder.RebuildTile(tx, tz, newVertices, newIndices, _agentConfig, navConfig);
+                if (ok) rebuilt++;
+            }
+        }
+
+        Console.WriteLine($"[PathfindingService] RebuildNavMeshRegion: rebuilt {rebuilt} tile(s) around ({center.X:F1},{center.Z:F1}) r={radius:F1}");
+        return rebuilt;
+    }
 }
 

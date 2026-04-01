@@ -40,6 +40,8 @@ namespace Spatial.Unity
     private Dictionary<int, Vector3> targetPositions = new Dictionary<int, Vector3>();
     private Dictionary<int, Quaternion> targetRotations = new Dictionary<int, Quaternion>();
     private Dictionary<int, Vector3> previousTargetPositions = new Dictionary<int, Vector3>();
+    private Dictionary<int, Color> agentColors = new Dictionary<int, Color>();
+    private Dictionary<int, Transform> agentLabels = new Dictionary<int, Transform>();
         
         void Start()
         {
@@ -81,6 +83,16 @@ namespace Spatial.Unity
             if (!enableSmoothing)
                 return;
             
+            // Billboard: keep agent ID labels facing the camera
+            if (Camera.main != null)
+            {
+                foreach (var kvp in agentLabels)
+                {
+                    if (kvp.Value != null)
+                        kvp.Value.rotation = Camera.main.transform.rotation;
+                }
+            }
+
             // Interpolate ALL entities towards their target positions
             // This runs every Unity frame (60-144 FPS) for ultra-smooth movement
             foreach (var kvp in entityObjects)
@@ -218,18 +230,47 @@ namespace Spatial.Unity
             GameObject visualObj = CreateShapeObject(state);
             visualObj.transform.SetParent(entityObj.transform);
             
-            // Set material based on type
+            // Set material based on type — agents get a unique per-entity color
             var renderer = visualObj.GetComponent<Renderer>();
             if (renderer != null)
             {
                 if (state.IsStatic && staticMaterial != null)
+                {
                     renderer.material = staticMaterial;
-                else if (state.Type == "Agent" && agentMaterial != null)
-                    renderer.material = agentMaterial;
+                }
+                else if (state.Type == "Agent" || state.Type == "Player")
+                {
+                    Color agentColor = GetAgentColor(state.Id);
+                    agentColors[state.Id] = agentColor;
+                    var mat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+                    mat.SetColor("_BaseColor", agentColor);
+                    renderer.material = mat;
+                }
                 else if (dynamicMaterial != null)
+                {
                     renderer.material = dynamicMaterial;
+                }
             }
             
+            // Create floating ID label for agents
+            if (!state.IsStatic && (state.Type == "Agent" || state.Type == "Player"))
+            {
+                float labelHeight = (state.Size != null && state.Size.Length >= 2) ? state.Size[1] * 0.5f + 0.6f : 1.8f;
+                var labelObj = new GameObject("AgentLabel");
+                labelObj.transform.SetParent(entityObj.transform);
+                labelObj.transform.localPosition = new Vector3(0f, labelHeight, 0f);
+
+                var tm = labelObj.AddComponent<TextMesh>();
+                tm.text = state.Id.ToString();
+                tm.fontSize = 28;
+                tm.color = agentColors.TryGetValue(state.Id, out var lc) ? lc : Color.white;
+                tm.anchor = TextAnchor.MiddleCenter;
+                tm.alignment = TextAlignment.Center;
+                tm.characterSize = 0.07f;
+
+                agentLabels[state.Id] = labelObj.transform;
+            }
+
             // Create velocity visualizer
             if (showVelocityVectors && !state.IsStatic)
             {
@@ -384,7 +425,7 @@ namespace Spatial.Unity
                 meshFilter.mesh = mesh;
                 
                 var meshRenderer = meshObj.AddComponent<MeshRenderer>();
-                meshRenderer.material = new Material(Shader.Find("Standard"));
+                meshRenderer.material = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             }
             else
             {
@@ -413,7 +454,7 @@ namespace Spatial.Unity
             lineRenderer.startWidth = 0.05f;
             lineRenderer.endWidth = 0.05f;
             lineRenderer.positionCount = 2;
-            lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+            lineRenderer.material = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
             lineRenderer.startColor = Color.yellow;
             lineRenderer.endColor = Color.red;
             
@@ -528,16 +569,44 @@ namespace Spatial.Unity
             targetPositions.Remove(id);
             targetRotations.Remove(id);
             previousTargetPositions.Remove(id);
+            agentColors.Remove(id);
+            agentLabels.Remove(id);
         }
         
+        /// <summary>
+        /// Returns the color assigned to a given agent entity.
+        /// Returns white if the entity has no assigned color.
+        /// </summary>
+        public Color GetEntityColor(int entityId)
+        {
+            return agentColors.TryGetValue(entityId, out var color) ? color : Color.white;
+        }
+
+        /// <summary>
+        /// Computes a deterministic, visually distinct color for an agent from its entity ID.
+        /// Uses golden-ratio hue spacing so any set of IDs produces well-separated colors.
+        /// </summary>
+        public static Color GetAgentColor(int entityId)
+        {
+            // Three independent quasi-random sequences using different irrational offsets
+            // so hue, saturation, and value vary independently across agent IDs.
+            const float phi  = 0.618033988f; // golden ratio — hue
+            const float phi2 = 0.381966011f; // 1-phi — saturation
+            const float phi3 = 0.236067977f; // phi^2-1 — value
+            float hue = ((entityId * phi)  % 1f + 1f) % 1f;
+            float sat = 0.65f + 0.35f * (((entityId * phi2) % 1f + 1f) % 1f); // 0.65–1.0
+            float val = 0.70f + 0.30f * (((entityId * phi3) % 1f + 1f) % 1f); // 0.70–1.0
+            return Color.HSVToRGB(hue, sat, val);
+        }
+
         /// <summary>
         /// Create a default material with the given color
         /// </summary>
         private Material CreateDefaultMaterial(string name, Color color)
         {
-            var material = new Material(Shader.Find("Standard"));
+            var material = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             material.name = name;
-            material.color = color;
+            material.SetColor("_BaseColor", color);
             return material;
         }
         
@@ -554,6 +623,8 @@ namespace Spatial.Unity
             targetPositions.Clear();
             targetRotations.Clear();
             previousTargetPositions.Clear();
+            agentColors.Clear();
+            agentLabels.Clear();
         }
     }
 }

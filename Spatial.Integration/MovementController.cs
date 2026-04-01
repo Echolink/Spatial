@@ -85,6 +85,28 @@ public class MovementController
     }
     
     /// <summary>
+    /// Gets the original requested target position for an entity (before navmesh snapping).
+    /// Returns null if entity has no active movement state.
+    /// </summary>
+    public Vector3? GetOriginalTargetPosition(int entityId)
+    {
+        if (_movementStates.TryGetValue(entityId, out var state))
+            return state.OriginalTargetPosition;
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the actual (navmesh-snapped) target position for an entity.
+    /// Returns null if entity has no active movement state.
+    /// </summary>
+    public Vector3? GetActualTargetPosition(int entityId)
+    {
+        if (_movementStates.TryGetValue(entityId, out var state))
+            return state.TargetPosition;
+        return null;
+    }
+
+    /// <summary>
     /// Gets the current waypoint index for an entity (for visualization/debugging).
     /// Returns -1 if entity has no active movement state.
     /// </summary>
@@ -335,6 +357,7 @@ public class MovementController
         var state = new MovementState
         {
             EntityId = request.EntityId,
+            OriginalTargetPosition = request.TargetPosition,
             TargetPosition = snappedTarget.Value, // Use snapped position
             MaxSpeed = request.MaxSpeed,
             AgentHeight = request.AgentHeight,
@@ -467,13 +490,27 @@ public class MovementController
         
         if (!IsOnCorrectFloor(currentPosition, targetWaypoint, agentHalfHeight, floorTolerance))
         {
-            float currentGroundY = currentPosition.Y - agentHalfHeight;
-            float targetGroundY = targetWaypoint.Y;
-            float floorDiff = Math.Abs(currentGroundY - targetGroundY);
-            Console.WriteLine($"[MovementController] Agent {entity.EntityId} on wrong floor - replanning");
-            Console.WriteLine($"  CurrentGroundY={currentGroundY:F2}, TargetGroundY={targetGroundY:F2}, Diff={floorDiff:F2}, Tolerance={floorTolerance:F2}");
-            ReplanPath(entity, state, currentPosition);
+            // Accumulate time on wrong floor before replanning.
+            // Replanning every frame (125 FPS) when falling creates a replan storm that
+            // wastes CPU without helping — the agent is still airborne on the next frame.
+            state.WrongFloorAccumulator += deltaTime;
+            const float wrongFloorReplanDelay = 0.5f;
+
+            if (state.WrongFloorAccumulator >= wrongFloorReplanDelay)
+            {
+                float currentGroundY = currentPosition.Y - agentHalfHeight;
+                float targetGroundY = targetWaypoint.Y;
+                float floorDiff = Math.Abs(currentGroundY - targetGroundY);
+                Console.WriteLine($"[MovementController] Agent {entity.EntityId} on wrong floor for {state.WrongFloorAccumulator:F2}s - replanning");
+                Console.WriteLine($"  CurrentGroundY={currentGroundY:F2}, TargetGroundY={targetGroundY:F2}, Diff={floorDiff:F2}, Tolerance={floorTolerance:F2}");
+                state.WrongFloorAccumulator = 0f;
+                ReplanPath(entity, state, currentPosition);
+            }
             return;
+        }
+        else
+        {
+            state.WrongFloorAccumulator = 0f;
         }
         
         // COLLISION PREDICTION: Check if we're about to collide with another agent
@@ -809,54 +846,153 @@ public class MovementController
             }
             // else: continue waiting, but with grounding applied
         }
-        // else AIRBORNE - do nothing, let physics handle it completely!
+        else if (_characterController.IsAirborne(entity))
+        {
+            // AIRBORNE RECOVERY: corrects spurious AIRBORNE states caused by missed/lost contact
+            // manifolds at terrain edges — without interfering with jumps or knockback.
+            //
+            // The key distinction is VERTICAL VELOCITY:
+            //   • Spurious AIRBORNE (bug): contact lost for one frame while the agent is
+            //     essentially standing still — vertical velocity is tiny (~0 to -1 m/s).
+            //   • Legitimate AIRBORNE (jump/knockback): agent was intentionally launched —
+            //     vertical velocity is large (|velY| > recoveryVelocityThreshold).
+            //
+            // If velY is large we let physics handle the arc completely.
+            // Only when velY is small do we look for a surface to snap back to.
+            const float recoveryVelocityThreshold = 2.0f; // m/s — below this = spurious, above = real physics
+            const float fallRecoveryThreshold     = 3.0f; // m   — max distance above surface to attempt snap
+
+            var vel = _physicsWorld.GetEntityVelocity(entity);
+
+            // Skip recovery for jumps (vel.Y > 0, moving up) or fast falls / knockback (|vel.Y| > threshold).
+            if (Math.Abs(vel.Y) > recoveryVelocityThreshold)
+                goto airborneRecoveryDone;
+
+            float agentFeetY = currentPosition.Y - agentHalfHeight;
+
+            // Use physics raycast first — the physics mesh Y may differ from navmesh Y by ~0.2 m
+            // due to voxelisation. Snapping to the wrong Y causes a constant bounce loop.
+            float groundSurfaceY;
+            bool foundSurface = false;
+
+            var rayStart = new Vector3(currentPosition.X, currentPosition.Y + 0.1f, currentPosition.Z);
+            var rayEnd   = new Vector3(currentPosition.X, currentPosition.Y - (fallRecoveryThreshold + agentHalfHeight + 0.5f), currentPosition.Z);
+            if (_physicsWorld.Raycast(rayStart, rayEnd, out var rayHit, out _))
+            {
+                groundSurfaceY = rayHit.Y;
+                foundSurface = true;
+            }
+            else
+            {
+                // Fallback: navmesh query (handles cases where physics mesh has no geometry directly below)
+                var navSurface = _pathfindingService.FindNearestValidPosition(
+                    new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
+                    new Vector3(1.0f, 5.0f, 1.0f));
+                if (navSurface != null)
+                {
+                    groundSurfaceY = navSurface.Value.Y;
+                    foundSurface = true;
+                }
+                else
+                {
+                    groundSurfaceY = 0f;
+                }
+            }
+
+            if (foundSurface)
+            {
+                float distAboveSurface = agentFeetY - groundSurfaceY;
+                if (distAboveSurface <= fallRecoveryThreshold && distAboveSurface >= -agentHalfHeight)
+                {
+                    float targetCenterY = groundSurfaceY + agentHalfHeight;
+                    float yDelta = Math.Abs(currentPosition.Y - targetCenterY);
+
+                    // Only teleport when correction is significant enough to matter.
+                    // Teleporting every frame clears BepuPhysics contact manifolds,
+                    // creating a constant AIRBORNE→snap→AIRBORNE cycle.
+                    if (yDelta > 0.05f)
+                    {
+                        var snappedCenter = new Vector3(currentPosition.X, targetCenterY, currentPosition.Z);
+                        _physicsWorld.SetEntityPosition(entity, snappedCenter);
+                        _physicsWorld.SetEntityVelocity(entity, new Vector3(vel.X, 0f, vel.Z));
+
+                        Console.WriteLine(
+                            $"[MovementController] Entity {entity.EntityId} fall-recovery snap: " +
+                            $"Y {currentPosition.Y:F2} -> {targetCenterY:F2} " +
+                            $"(physics surface={groundSurfaceY:F2}, dist={distAboveSurface:F2}m)");
+                    }
+
+                    // Always force GROUNDED when near the surface, even without a position snap.
+                    // This re-establishes grounded state while physics contacts regenerate.
+                    _characterController.SetGrounded(entity);
+                }
+            }
+
+            airborneRecoveryDone:;
+        }
+        // else AIRBORNE with high velocity — jump or knockback, let physics handle the arc fully
     }
     
     /// <summary>
-    /// Validates the current path and replans if blocked.
+    /// Validates the current path and replans if the agent is stuck or upcoming waypoints
+    /// are no longer on the NavMesh (e.g., after a dynamic tile rebuild).
+    /// Called every PathValidationInterval seconds per entity.
     /// </summary>
     private void ValidateAndReplanIfNeeded(PhysicsEntity entity, MovementState state, Vector3 currentPosition)
     {
-        // TODO: Implement dynamic path validation (check for obstacles, blocked paths, etc.)
-        // For now, this is a placeholder that doesn't do validation
-        // The PathSegmentValidator handles static validation at path creation time
-        
-        /* 
-        var validationResult = _pathValidator.ValidatePath(
-            state.Waypoints, 
-            state.CurrentWaypointIndex, 
-            entity.EntityId
-        );
-        
-        if (!validationResult.IsValid)
+        // Respect replan cooldown — avoid thrashing
+        var timeSinceLastReplan = (float)(DateTime.UtcNow - state.LastReplanTime).TotalSeconds;
+        if (timeSinceLastReplan < _config.ReplanCooldown) return;
+
+        // ── Check 1: Stuck detection ────────────────────────────────────────
+        // If the agent hasn't moved horizontally beyond the threshold over multiple
+        // validation intervals, it is likely stuck against geometry or another agent.
+        float horizontalMoved = Vector2.Distance(
+            new Vector2(currentPosition.X, currentPosition.Z),
+            new Vector2(state.LastValidationPosition.X, state.LastValidationPosition.Z));
+
+        state.LastValidationPosition = currentPosition;
+
+        if (horizontalMoved < _config.StuckDetectionThreshold)
         {
-            Console.WriteLine($"[MovementController] Path blocked for entity {entity.EntityId}: {validationResult.BlockageType}");
-            OnPathBlocked?.Invoke(entity.EntityId);
-            
-            // Check if we can use local avoidance for temporary obstacles
-            if (validationResult.BlockageType == BlockageType.Temporary && _config.TryLocalAvoidanceFirst)
+            state.ValidationStuckCount++;
+            if (state.ValidationStuckCount >= _config.StuckDetectionCount)
             {
-                var nearbyEntities = _localAvoidance.GetNearbyEntities(
-                    currentPosition, 
-                    entity.EntityId, 
-                    _config.MaxAvoidanceNeighbors
-                );
-                
-                if (_localAvoidance.CanAvoidLocally(currentPosition, state.TargetPosition, nearbyEntities))
-                {
-                    Console.WriteLine($"[MovementController] Using local avoidance for temporary obstacle");
-                    return; // Let local avoidance handle it
-                }
-            }
-            
-            // Need to replan - check cooldown
-            var timeSinceLastReplan = (float)(DateTime.UtcNow - state.LastReplanTime).TotalSeconds;
-            if (timeSinceLastReplan >= _config.ReplanCooldown)
-            {
+                Console.WriteLine($"[MovementController] Entity {entity.EntityId} stuck (moved {horizontalMoved:F2}m over {state.ValidationStuckCount} intervals), replanning");
+                state.ValidationStuckCount = 0;
                 ReplanPath(entity, state, currentPosition);
+                return;
             }
         }
-        */
+        else
+        {
+            state.ValidationStuckCount = 0;
+        }
+
+        // ── Check 2: Waypoint look-ahead ────────────────────────────────────
+        // Verify the next N waypoints are still valid NavMesh positions.
+        // In a static NavMesh this is a no-op; it becomes meaningful after
+        // dynamic tile rebuilds (Step 5).
+        if (_config.PathValidationLookaheadWaypoints > 0 && state.Waypoints.Count > 0)
+        {
+            int lookaheadEnd = Math.Min(
+                state.CurrentWaypointIndex + _config.PathValidationLookaheadWaypoints,
+                state.Waypoints.Count);
+
+            // Tight snap extents: accept the waypoint only if it's within 2m horizontally
+            var snapExtents = new Vector3(2f, 4f, 2f);
+
+            for (int i = state.CurrentWaypointIndex; i < lookaheadEnd; i++)
+            {
+                if (!_pathfinder.IsValidPosition(state.Waypoints[i], snapExtents))
+                {
+                    Console.WriteLine($"[MovementController] Waypoint {i} for entity {entity.EntityId} is no longer on NavMesh, replanning");
+                    state.ValidationStuckCount = 0;
+                    ReplanPath(entity, state, currentPosition);
+                    return;
+                }
+            }
+        }
     }
     
     /// <summary>
@@ -1143,4 +1279,15 @@ public class MovementController
         
         // Frame counter for slope grounding frequency
         public int SlopeGroundingFrameCounter { get; set; } = 0;
+
+        // Stuck detection: track position at last validation tick
+        public Vector3 LastValidationPosition { get; set; }
+        public int ValidationStuckCount { get; set; } = 0;
+
+        // Target tracking: original requested position vs navmesh-snapped position
+        public Vector3 OriginalTargetPosition { get; set; }
+
+        // Accumulates time spent in a wrong-floor condition before triggering a replan.
+        // Prevents the per-frame replan storm when an agent is falling.
+        public float WrongFloorAccumulator { get; set; } = 0f;
     }

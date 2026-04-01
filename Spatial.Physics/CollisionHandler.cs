@@ -29,7 +29,14 @@ public struct CollisionHandler : INarrowPhaseCallbacks
     
     // Ground contact callbacks - use holder object so they can be updated after creation
     private GroundContactCallbacks? _groundContactCallbacks;
-    
+
+    // Tracks which (dynamicEntityId, groundEntityId) pairs are currently active ground contacts.
+    // Used to guard OnContactRemoved so it only fires NotifyGroundContactRemoved for pairs that
+    // were actually established as ground contacts (not side/wall contacts on the same body).
+    // HashSet<> is a reference type: the struct copy inside BepuPhysics and _collisionHandler in
+    // PhysicsWorld both point to the same heap instance — same pattern as _groundContactCallbacks.
+    private HashSet<(int, int)>? _activeGroundContactPairs;
+
     /// <summary>
     /// Creates a new collision handler.
     /// </summary>
@@ -45,6 +52,7 @@ public struct CollisionHandler : INarrowPhaseCallbacks
         _collisionEventCooldown = collisionEventCooldown;
         _collisionPairTracker = onCollision != null ? new Dictionary<(int, int), DateTime>() : null;
         _groundContactCallbacks = groundContactCallbacks;
+        _activeGroundContactPairs = groundContactCallbacks != null ? new HashSet<(int, int)>() : null;
     }
     
     /// <summary>
@@ -338,34 +346,52 @@ public struct CollisionHandler : INarrowPhaseCallbacks
             return;
         }
         
-        // Get contact normal to check if it's pointing upward (ground contact)
+        // Get contact normal to check if it's pointing upward (ground contact).
+        // Loop ALL contact points — index 0 may be a side contact; floor contacts can be at any index.
+        // Threshold lowered from 0.7 (~45°) to 0.5 (~60°) to catch shallower ramp contacts.
         var contactCount = manifold.Count;
         if (contactCount > 0)
         {
-            manifold.GetContact(0, out var offset, out var normal, out var depth, out _);
-            
-            // Check if normal is pointing mostly upward (Y > 0.7 means ~45 degree slope or flatter)
-            bool isGroundContact = normal.Y > 0.7f;
-            
-            // DIAGNOSTIC LOGGING: Log detailed contact information for Agent-3
+            bool foundGroundContact = false;
+            Vector3 bestNormal = Vector3.Zero;
+            float bestDepth = 0f;
+            Vector3 bestOffset = Vector3.Zero;
+
+            for (int ci = 0; ci < contactCount; ci++)
+            {
+                manifold.GetContact(ci, out var cOffset, out var cNormal, out var cDepth, out _);
+                if (cNormal.Y > 0.5f && cNormal.Y > bestNormal.Y)
+                {
+                    foundGroundContact = true;
+                    bestNormal = cNormal;
+                    bestDepth = cDepth;
+                    bestOffset = cOffset;
+                }
+            }
+
+            // DIAGNOSTIC LOGGING: Log detailed contact information for tracked entity
             if (ContactDiagnostics.IsEnabled && dynamicEntity.EntityId == ContactDiagnostics.TrackedEntityId)
             {
-                var normalAngleDegrees = MathF.Acos(normal.Y) * (180.0f / MathF.PI);
+                var logNormal = foundGroundContact ? bestNormal : default;
+                var normalAngleDegrees = logNormal.Y > 0f
+                    ? MathF.Acos(Math.Clamp(logNormal.Y, -1f, 1f)) * (180.0f / MathF.PI)
+                    : 90f;
                 ContactDiagnostics.LogContact(new ContactInfo
                 {
                     DynamicEntityId = dynamicEntity.EntityId,
                     GroundEntityId = groundEntity.EntityId,
-                    ContactNormal = normal,
-                    PenetrationDepth = depth,
-                    ContactOffset = offset,
+                    ContactNormal = logNormal,
+                    PenetrationDepth = bestDepth,
+                    ContactOffset = bestOffset,
                     NormalAngleDegrees = normalAngleDegrees,
-                    IsGroundContact = isGroundContact,
+                    IsGroundContact = foundGroundContact,
                     Timestamp = DateTime.UtcNow
                 });
             }
-            
-            if (isGroundContact && _groundContactCallbacks?.OnGroundContact != null)
+
+            if (foundGroundContact && _groundContactCallbacks?.OnGroundContact != null)
             {
+                _activeGroundContactPairs?.Add((dynamicEntity.EntityId, groundEntity.EntityId));
                 _groundContactCallbacks.OnGroundContact(dynamicEntity, groundEntity);
             }
         }
@@ -437,7 +463,14 @@ public struct CollisionHandler : INarrowPhaseCallbacks
                 return;
             }
             
-            _groundContactCallbacks.OnGroundContactRemoved(dynamicEntity, groundEntity);
+            // Only fire removal if this pair was previously established as a ground contact.
+            // Without this guard, side/wall contact removals for the same static body would
+            // spuriously evict valid floor entries from the ground-contact HashSet.
+            var pairKey = (dynamicEntity.EntityId, groundEntity.EntityId);
+            if (_activeGroundContactPairs != null && _activeGroundContactPairs.Remove(pairKey))
+            {
+                _groundContactCallbacks.OnGroundContactRemoved(dynamicEntity, groundEntity);
+            }
         }
     }
     

@@ -1,6 +1,7 @@
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.Constraints;
+using BepuPhysics.Trees;
 using BepuUtilities;
 using BepuUtilities.Memory;
 using System.Numerics;
@@ -115,6 +116,7 @@ public class PhysicsWorld : IDisposable
     /// <param name="isStatic">Whether the entity is static (immovable)</param>
     /// <param name="mass">Mass for dynamic bodies (ignored for static bodies)</param>
     /// <returns>The created physics entity</returns>
+    [Obsolete("Use RegisterEntityWithInertia() instead for correct collision response and gravity control. RegisterEntity() uses simplified inertia which can cause unstable physics behavior.")]
     public PhysicsEntity RegisterEntity(int entityId, EntityType entityType, Vector3 position, TypedIndex shape, bool isStatic = false, float mass = 1.0f)
     {
         PhysicsEntity entity;
@@ -571,20 +573,105 @@ public class PhysicsWorld : IDisposable
     }
     
     /// <summary>
-    /// Performs a raycast from start to end.
-    /// Returns true if something was hit.
-    /// Note: For MVP, this is simplified. Full implementation would return hit details.
+    /// Performs a raycast from <paramref name="start"/> toward <paramref name="end"/>.
+    /// Returns true if any physics body was hit between the two points.
     /// </summary>
+    /// <param name="start">Ray origin in world space.</param>
+    /// <param name="end">Ray end point in world space.</param>
+    /// <returns>True if something was hit.</returns>
     public bool Raycast(Vector3 start, Vector3 end)
     {
+        return Raycast(start, end, out _, out _);
+    }
+
+    /// <summary>
+    /// Performs a raycast from <paramref name="start"/> toward <paramref name="end"/> with full hit info.
+    /// </summary>
+    /// <param name="start">Ray origin in world space.</param>
+    /// <param name="end">Ray end point in world space.</param>
+    /// <param name="hitPoint">World-space position of the first hit, or <see cref="Vector3.Zero"/> if no hit.</param>
+    /// <param name="hitEntityId">Game entity ID of the hit body, or -1 if no hit or entity not registered.</param>
+    /// <returns>True if something was hit.</returns>
+    public bool Raycast(Vector3 start, Vector3 end, out Vector3 hitPoint, out int hitEntityId)
+    {
         var direction = end - start;
-        var rayOrigin = start;
-        var rayDirection = Vector3.Normalize(direction);
-        var maxDistance = direction.Length();
-        
-        // TODO: Implement proper raycast using BepuPhysics v2 API
-        // This requires checking the correct Ray/RayHit types
-        return false; // Placeholder
+        float maxDistance = direction.Length();
+
+        if (maxDistance < 1e-6f)
+        {
+            hitPoint = Vector3.Zero;
+            hitEntityId = -1;
+            return false;
+        }
+
+        var normalizedDir = direction / maxDistance;
+        var handler = new RaycastHitHandler(_entityRegistry, maxDistance);
+
+        _simulation.RayCast(ref start, ref normalizedDir, maxDistance, ref handler, 0);
+
+        if (handler.HitSomething)
+        {
+            hitPoint = start + normalizedDir * handler.HitDistance;
+            hitEntityId = handler.HitEntityId;
+            return true;
+        }
+
+        hitPoint = Vector3.Zero;
+        hitEntityId = -1;
+        return false;
+    }
+
+    /// <summary>
+    /// Returns true if there is no static or dynamic physics body blocking the line between
+    /// <paramref name="from"/> and <paramref name="to"/>.
+    /// </summary>
+    public bool HasLineOfSight(Vector3 from, Vector3 to)
+    {
+        return !Raycast(from, to);
+    }
+
+    /// <summary>
+    /// BepuPhysics v2 ray hit handler struct.
+    /// Keeps only the closest hit and maps the <see cref="CollidableReference"/> back to a game entity ID.
+    /// </summary>
+    private struct RaycastHitHandler : IRayHitHandler
+    {
+        private readonly PhysicsEntityRegistry _registry;
+        private float _nearestT;
+
+        public bool HitSomething { get; private set; }
+        public float HitDistance { get; private set; }
+        public int HitEntityId { get; private set; }
+
+        public RaycastHitHandler(PhysicsEntityRegistry registry, float maxDistance)
+        {
+            _registry = registry;
+            _nearestT = maxDistance;
+            HitSomething = false;
+            HitDistance = maxDistance;
+            HitEntityId = -1;
+        }
+
+        public bool AllowTest(CollidableReference collidable) => true;
+        public bool AllowTest(CollidableReference collidable, int childIndex) => true;
+
+        public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal,
+            CollidableReference collidable, int childIndex)
+        {
+            if (t < _nearestT)
+            {
+                _nearestT = t;
+                maximumT = t; // Prune further-away candidates
+                HitSomething = true;
+                HitDistance = t;
+
+                PhysicsEntity? entity = collidable.Mobility == CollidableMobility.Static
+                    ? _registry.GetEntityByStaticHandle(collidable.StaticHandle)
+                    : _registry.GetEntityByBodyHandle(collidable.BodyHandle);
+
+                HitEntityId = entity?.EntityId ?? -1;
+            }
+        }
     }
     
     /// <summary>

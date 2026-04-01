@@ -210,10 +210,157 @@ public class NavMeshGenerator
             verticesArray[i * 3 + 1] = vertices[i].Y;
             verticesArray[i * 3 + 2] = vertices[i].Z;
         }
-        
+
         var indicesArray = indices.ToArray();
-        
+
         return GenerateNavMeshDirect(verticesArray, indicesArray, agentConfig);
+    }
+
+    /// <summary>
+    /// Generates a tile-based NavMesh that supports runtime tile updates.
+    /// The NavMesh is split into a regular grid of tiles. Individual tiles can
+    /// later be removed and replaced via <see cref="DtNavMesh.RemoveTile"/> and
+    /// <see cref="DtNavMesh.AddTile"/> without rebuilding the whole mesh.
+    /// </summary>
+    /// <param name="vertices">World geometry vertices (x,y,z triplets).</param>
+    /// <param name="indices">Triangle indices into the vertex array.</param>
+    /// <param name="agentConfig">Agent physical constraints (single source of truth).</param>
+    /// <param name="navConfig">Tile configuration (size, max tiles, max polys per tile).</param>
+    /// <returns>
+    /// A <see cref="NavMeshData"/> with <see cref="NavMeshData.IsMultiTile"/> = true.
+    /// </returns>
+    public NavMeshData GenerateTiledNavMesh(float[] vertices, int[] indices,
+        AgentConfig agentConfig, NavMeshConfiguration navConfig)
+    {
+        var (bmin, bmax) = CalculateBounds(vertices);
+        bmin.Y -= agentConfig.CellHeight;
+        bmax.Y += agentConfig.Height * 2f;
+
+        float cellSize = agentConfig.Radius / 2.0f;
+        float cellHeight = cellSize / 2.0f;
+        float tileSize = navConfig.TileSize;
+
+        // Initialize a multi-tile DtNavMesh
+        var navMeshParams = new DtNavMeshParams
+        {
+            orig = bmin,
+            tileWidth = tileSize,
+            tileHeight = tileSize,
+            maxTiles = navConfig.MaxTiles,
+            maxPolys = navConfig.MaxPolysPerTile
+        };
+
+        var navMesh = new DtNavMesh();
+        navMesh.Init(navMeshParams, 6); // 6 = max verts per poly (matching monolithic path)
+
+        Console.WriteLine($"[TiledNavMesh] Initialized: tileSize={tileSize}, maxTiles={navConfig.MaxTiles}");
+
+        // Tile the world and build each tile
+        int tilesBuilt = 0;
+        float worldWidth = bmax.X - bmin.X;
+        float worldDepth = bmax.Z - bmin.Z;
+        int tileCountX = (int)Math.Ceiling(worldWidth / tileSize);
+        int tileCountZ = (int)Math.Ceiling(worldDepth / tileSize);
+
+        Console.WriteLine($"[TiledNavMesh] Building {tileCountX}x{tileCountZ} tiles...");
+
+        var geomProvider = new SimpleInputGeomProvider(vertices, indices);
+        var walkableAreaMod = new RcAreaModification(0x3f);
+
+        for (int tz = 0; tz < tileCountZ; tz++)
+        {
+            for (int tx = 0; tx < tileCountX; tx++)
+            {
+                var tileBmin = new RcVec3f(
+                    bmin.X + tx * tileSize,
+                    bmin.Y,
+                    bmin.Z + tz * tileSize);
+                var tileBmax = new RcVec3f(
+                    tileBmin.X + tileSize,
+                    bmax.Y,
+                    tileBmin.Z + tileSize);
+
+                var config = new RcConfig(
+                    RcPartition.WATERSHED, cellSize, cellHeight,
+                    agentConfig.MaxSlope, agentConfig.Height, agentConfig.Radius, agentConfig.MaxClimb,
+                    1, 4,
+                    agentConfig.Radius * 8.0f, 1.3f, 6,
+                    cellSize * 6.0f, cellHeight,
+                    true, true, true,
+                    walkableAreaMod, true);
+
+                var builderConfig = new RcBuilderConfig(config, tileBmin, tileBmax);
+                var builder = new RcBuilder();
+                var buildResult = builder.Build(geomProvider, builderConfig, keepInterResults: false);
+
+                if (buildResult?.Mesh == null || buildResult.Mesh.npolys == 0)
+                    continue; // Empty tile — skip
+
+                var tileData = BuildTileData(buildResult, config, agentConfig, tx, tz);
+                if (tileData == null) continue;
+
+                navMesh.AddTile(tileData, 0, 0, out _);
+                tilesBuilt++;
+            }
+        }
+
+        Console.WriteLine($"[TiledNavMesh] Built {tilesBuilt} non-empty tiles");
+        var query = new DtNavMeshQuery(navMesh);
+        return new NavMeshData(navMesh, query, isMultiTile: true, tileSize: tileSize);
+    }
+
+    /// <summary>
+    /// Builds a single DtMeshData for a specific tile region from pre-built Recast results.
+    /// Used by both <see cref="GenerateTiledNavMesh"/> and runtime tile rebuilds.
+    /// </summary>
+    public DtMeshData? BuildTileData(RcBuilderResult buildResult, RcConfig config,
+        AgentConfig agentConfig, int tileX, int tileZ)
+    {
+        var mesh = buildResult.Mesh;
+        var meshDetail = buildResult.MeshDetail;
+        if (mesh == null) return null;
+
+        // Set walkable flags
+        if (mesh.flags != null && mesh.areas != null)
+        {
+            for (int i = 0; i < mesh.npolys; i++)
+            {
+                if (mesh.areas[i] == 63)
+                    mesh.flags[i] = 0x01; // walkable
+            }
+        }
+
+        var navMeshCreateParams = new DtNavMeshCreateParams
+        {
+            verts = mesh.verts,
+            vertCount = mesh.nverts,
+            polys = mesh.polys,
+            polyAreas = mesh.areas,
+            polyFlags = mesh.flags,
+            polyCount = mesh.npolys,
+            nvp = mesh.nvp,
+            walkableHeight = agentConfig.Height,
+            walkableRadius = agentConfig.Radius,
+            walkableClimb = agentConfig.MaxClimb,
+            bmin = mesh.bmin,
+            bmax = mesh.bmax,
+            cs = config.Cs,
+            ch = config.Ch,
+            buildBvTree = true,
+            tileX = tileX,
+            tileLayer = tileZ
+        };
+
+        if (meshDetail != null)
+        {
+            navMeshCreateParams.detailMeshes = meshDetail.meshes;
+            navMeshCreateParams.detailVerts = meshDetail.verts;
+            navMeshCreateParams.detailVertsCount = meshDetail.nverts;
+            navMeshCreateParams.detailTris = meshDetail.tris;
+            navMeshCreateParams.detailTriCount = meshDetail.ntris;
+        }
+
+        return DtNavMeshBuilder.CreateNavMeshData(navMeshCreateParams);
     }
     
     /// <summary>

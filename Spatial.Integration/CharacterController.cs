@@ -23,6 +23,7 @@ namespace Spatial.Integration;
 /// Enables Minecraft-style behavior: agents follow paths while responding to
 /// gravity, knockback, falling, and collisions.
 /// </summary>
+[Obsolete("Use MotorCharacterController instead. It provides 2x better path efficiency, zero replanning, and better slope stability. See PRODUCTION_ARCHITECTURE.md.")]
 public class CharacterController : ICharacterController
 {
     private readonly PhysicsWorld _physicsWorld;

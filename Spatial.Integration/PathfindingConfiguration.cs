@@ -166,4 +166,27 @@ public class PathfindingConfiguration
     /// Default: true (attempt to fix invalid paths before rejecting)
     /// </summary>
     public bool EnablePathAutoFix { get; set; } = true;
+
+    /// <summary>
+    /// Number of upcoming waypoints to verify against the NavMesh during periodic validation.
+    /// A waypoint that has drifted off the NavMesh (e.g., after a tile rebuild) triggers replanning.
+    /// Set to 0 to disable waypoint look-ahead checking.
+    /// Default: 3 waypoints ahead
+    /// </summary>
+    public int PathValidationLookaheadWaypoints { get; set; } = 3;
+
+    /// <summary>
+    /// Minimum horizontal distance (meters) an agent must move between validation intervals
+    /// before being considered "stuck". If the agent doesn't move this much over two consecutive
+    /// intervals, it triggers a replan.
+    /// Default: 0.3 meters
+    /// </summary>
+    public float StuckDetectionThreshold { get; set; } = 0.3f;
+
+    /// <summary>
+    /// Number of consecutive stuck detections before forcing a replan.
+    /// Higher values tolerate brief pauses (e.g., waiting behind another agent).
+    /// Default: 2
+    /// </summary>
+    public int StuckDetectionCount { get; set; } = 2;
 }

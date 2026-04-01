@@ -692,11 +692,15 @@ public static class TestEnhancedShowcase
                     
                     if (waypoints != null && waypoints.Count > 0)
                     {
+                        var originalTarget = movementController.GetOriginalTargetPosition(agent.EntityId);
+                        var snappedTarget = movementController.GetActualTargetPosition(agent.EntityId);
                         state.AgentPaths.Add(new PathData
                         {
                             EntityId = agent.EntityId,
                             Waypoints = waypoints.Select(wp => new[] { wp.X, wp.Y, wp.Z }).ToList(),
-                            PathLength = 0 // Not critical for visualization
+                            PathLength = 0, // Not critical for visualization
+                            OriginalTarget = originalTarget.HasValue ? new[] { originalTarget.Value.X, originalTarget.Value.Y, originalTarget.Value.Z } : null,
+                            SnappedTarget = snappedTarget.HasValue ? new[] { snappedTarget.Value.X, snappedTarget.Value.Y, snappedTarget.Value.Z } : null
                         });
                         totalPathsAdded++;
                     }

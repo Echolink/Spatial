@@ -518,6 +518,31 @@ class Program
                 
                 TestEnhancedShowcase.Run(vizServer, meshPath, agentCount);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "scale")
+            {
+                // Scale stress test — validate 50–200+ agents
+                Console.WriteLine("[Info] Running SCALE STRESS TEST\n");
+                Console.WriteLine("[Info] This validates:\n");
+                Console.WriteLine("[Info]   - System stability with 50–200+ agents");
+                Console.WriteLine("[Info]   - Simulation throughput (steps/second under load)");
+                Console.WriteLine("[Info]   - Path success rate at scale");
+                Console.WriteLine("[Info]   - Replanning frequency and physics stability\n");
+
+                int agentCount = 50; // Default
+                if (args.Length > 1 && int.TryParse(args[1], out int parsedCount))
+                {
+                    agentCount = Math.Max(1, parsedCount);
+                }
+
+                string? meshPath = null;
+                if (args.Length > 2)
+                {
+                    meshPath = args[2];
+                }
+
+                Console.WriteLine($"[Info] Agent count: {agentCount}\n");
+                TestScaleShowcase.Run(vizServer, agentCount, meshPath);
+            }
             else if (args.Length > 0 && args[0].ToLower() == "phase1")
             {
                 // Run Phase 1 diagnostic test for Agent-3 falling issue
@@ -693,14 +718,21 @@ class Program
                 
                 TestNavMeshAccuracy.Run(meshPath);
             }
+            else if (args.Length > 0 && args[0].ToLower() == "sample")
+            {
+                // Run the game server integration sample — demonstrates the World façade API.
+                GameServerIntegrationSample.Run(ResolvePath("worlds/seperated_land.obj"));
+            }
             else
             {
                 // Run all tests with visualization
                 Console.WriteLine("[Info] Running ALL TESTS");
+                Console.WriteLine("[Info]   Use 'dotnet run -- sample' to run game server integration sample (World API demo)");
                 Console.WriteLine("[Info]   Use 'dotnet run -- custom' to run only custom mesh test");
                 Console.WriteLine("[Info]   Use 'dotnet run -- direct [input.obj] [output.obj]' to test direct navmesh generation");
                 Console.WriteLine("[Info]   Use 'dotnet run -- showcase' for comprehensive demonstration of latest features");
                 Console.WriteLine("[Info]   Use 'dotnet run -- enhanced [agentCount] [meshPath]' for enhanced test with metrics (RECOMMENDED)");
+                Console.WriteLine("[Info]   Use 'dotnet run -- scale [agentCount] [meshPath]' for scale stress test with 50–200+ agents");
                 Console.WriteLine("[Info]   Use 'dotnet run -- collision' to test mesh collision system");
                 Console.WriteLine("[Info]   Use 'dotnet run -- physics-pathfinding' to test physics-pathfinding integration");
                 Console.WriteLine("[Info]   Use 'dotnet run -- agent-collision' to test agent blocking and push mechanics");

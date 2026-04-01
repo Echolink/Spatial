@@ -57,4 +57,6 @@ public class PathData
     public List<float[]> Waypoints { get; set; } = new(); // List of [x,y,z]
     public float PathLength { get; set; }
     public int EntityId { get; set; } // Which entity is following this path
+    public float[]? OriginalTarget { get; set; } // Requested target [x,y,z] before navmesh snapping
+    public float[]? SnappedTarget { get; set; }  // Actual navmesh-snapped target [x,y,z]
 }

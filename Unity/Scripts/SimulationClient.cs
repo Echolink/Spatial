@@ -199,6 +199,8 @@ namespace Spatial.Unity
         public List<float[]> Waypoints = new List<float[]>(); // Each waypoint is [x, y, z]
         public float PathLength;
         public int EntityId;
+        public float[] OriginalTarget; // Requested target [x, y, z] before navmesh snapping (may be null)
+        public float[] SnappedTarget;  // Actual navmesh-snapped target [x, y, z] (may be null)
     }
     
     #endregion

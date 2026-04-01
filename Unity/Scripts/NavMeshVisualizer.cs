@@ -160,7 +160,7 @@ namespace Spatial.Unity
                 
                 // Create line renderer
                 pathLine = pathObject.AddComponent<LineRenderer>();
-                pathLine.material = new Material(Shader.Find("Sprites/Default"));
+                pathLine.material = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
                 pathLine.startColor = pathColor;
                 pathLine.endColor = pathColor;
                 pathLine.startWidth = pathLineWidth;
@@ -226,8 +226,9 @@ namespace Spatial.Unity
                     
                     // Set color
                     var renderer = waypointObj.GetComponent<Renderer>();
-                    renderer.material = new Material(Shader.Find("Standard"));
-                    renderer.material.color = pathColor;
+                    var waypointMat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+                    waypointMat.SetColor("_BaseColor", pathColor);
+                    renderer.material = waypointMat;
                     
                     waypointObjects.Add(waypointObj);
                 }
@@ -275,20 +276,20 @@ namespace Spatial.Unity
         /// </summary>
         private Material CreateTransparentMaterial(string name, Color color)
         {
-            var material = new Material(Shader.Find("Standard"));
+            var material = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             material.name = name;
-            material.color = color;
-            
-            // Enable transparency
-            material.SetFloat("_Mode", 3); // Transparent mode
+            material.SetColor("_BaseColor", color);
+
+            // URP transparency setup
+            material.SetFloat("_Surface", 1f);   // 1 = Transparent
+            material.SetFloat("_Blend", 0f);     // 0 = Alpha blend
+            material.SetFloat("_ZWrite", 0f);
+            material.SetFloat("_AlphaClip", 0f);
+            material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
             material.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
             material.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            material.SetInt("_ZWrite", 0);
-            material.DisableKeyword("_ALPHATEST_ON");
-            material.EnableKeyword("_ALPHABLEND_ON");
-            material.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-            material.renderQueue = 3000;
-            
+            material.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+
             return material;
         }
         
