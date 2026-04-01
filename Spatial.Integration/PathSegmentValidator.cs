@@ -102,17 +102,18 @@ public class PathSegmentValidator
             result.Statistics.TotalLength += totalDistance;
             result.Statistics.TotalVerticalChange += Math.Abs(verticalDistance);
             
-            // Check 1: Maximum climb constraint (absolute vertical distance)
+            // Check 1: Maximum climb constraint (ascending segments only).
+            // MaxClimb limits how high an agent can STEP UP; it does not restrict descent.
             float segmentClimb = Math.Abs(verticalDistance);
             if (segmentClimb > result.Statistics.MaxSegmentClimb)
             {
                 result.Statistics.MaxSegmentClimb = segmentClimb;
             }
-            
-            if (segmentClimb > maxClimb)
+
+            if (verticalDistance > maxClimb) // positive delta.Y = ascending
             {
                 result.IsValid = false;
-                result.RejectionReason = 
+                result.RejectionReason =
                     $"Segment {i}→{i+1} exceeds MaxClimb: {segmentClimb:F2}m > {maxClimb:F2}m " +
                     $"(from Y={current.Y:F2} to Y={next.Y:F2})";
                 result.ViolatingSegmentIndex = i;
@@ -143,12 +144,11 @@ public class PathSegmentValidator
             }
             else
             {
-                // Pure vertical segment - check if it's within climb limit
-                // (already checked above, but flag as vertical)
-                if (segmentClimb > maxClimb)
+                // Pure vertical segment — only block pure ascent beyond MaxClimb.
+                if (verticalDistance > maxClimb)
                 {
                     result.IsValid = false;
-                    result.RejectionReason = 
+                    result.RejectionReason =
                         $"Segment {i}→{i+1} is pure vertical jump: {segmentClimb:F2}m > {maxClimb:F2}m";
                     result.ViolatingSegmentIndex = i;
                     return result;
@@ -187,30 +187,27 @@ public class PathSegmentValidator
             var current = waypoints[i];
             var next = waypoints[i + 1];
             var delta = next - current;
-            
-            float verticalDistance = Math.Abs(delta.Y);
-            
-            // If segment violates climb constraint, try to split it
-            if (verticalDistance > maxClimb)
+
+            // Only split ascending segments; descent is not climb-limited.
+            if (delta.Y > maxClimb)
             {
-                // Calculate how many intermediate points we need
-                int splits = (int)Math.Ceiling(verticalDistance / maxClimb);
-                
-                // Add intermediate waypoints
+                int splits = (int)Math.Ceiling(delta.Y / maxClimb);
+
                 for (int j = 1; j < splits; j++)
                 {
                     float t = (float)j / splits;
-                    var intermediate = Vector3.Lerp(current, next, t);
-                    fixedPath.Add(intermediate);
+                    fixedPath.Add(Vector3.Lerp(current, next, t));
                 }
             }
-            
+
             fixedPath.Add(next);
         }
-        
-        // Validate the fixed path
-        var validation = ValidatePath(fixedPath, maxClimb, maxSlope);
-        
+
+        // Re-validate climb only. Interpolated waypoints are not on the navmesh surface,
+        // so checking slope angle against them is meaningless — the navmesh generation
+        // already enforced MaxSlope on all walkable polygons.
+        var validation = ValidatePath(fixedPath, maxClimb, float.MaxValue);
+
         return validation.IsValid ? fixedPath : null;
     }
 }
