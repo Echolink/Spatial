@@ -290,7 +290,6 @@ public class MovementController
             if (horizontalDist > 2.0f)
             {
                 Console.WriteLine($"[MovementController] Agent spawned off navmesh, teleporting to nearest valid position");
-                // Teleport agent to nearest navmesh position
                 var teleportPos = new Vector3(nearestNavmesh.Value.X, nearestNavmesh.Value.Y + agentHalfHeight, nearestNavmesh.Value.Z);
                 _physicsWorld.SetEntityPosition(entity, teleportPos);
                 snappedStart = teleportPos;
@@ -311,7 +310,7 @@ public class MovementController
                 request.TargetPosition
             );
         }
-        
+
         // Snap target position to navmesh (use provided Y as search starting point)
         var snappedTarget = _pathfindingService.FindNearestValidPosition(request.TargetPosition, searchExtents);
         if (snappedTarget == null)
@@ -322,21 +321,21 @@ public class MovementController
                 request.TargetPosition
             );
         }
-        
+
         Console.WriteLine($"[MovementController] Start position: ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
         Console.WriteLine($"[MovementController] Target position: ({snappedTarget.Value.X:F2}, {snappedTarget.Value.Y:F2}, {snappedTarget.Value.Z:F2})");
-        
-        // REMOVED: Position correction - agent is already at correct position after settling
-        // No need to teleport agent - it's standing on valid ground
-        
-        // Find path using snapped positions
+
+        // Find path using ground-level start (navmesh surface Y, not capsule-center Y).
+        // Passing capsule-center Y to DotRecast causes it to pick the nearest polygon by
+        // 3D distance, which may be a ledge or upper terrace polygon instead of the ground
+        // polygon the agent is actually standing on.
         var pathfindingExtents = new Vector3(
             _config.PathfindingSearchExtentsHorizontal,
             _config.PathfindingSearchExtentsVertical,
             _config.PathfindingSearchExtentsHorizontal
         );
-        // CRITICAL FIX: Use PathfindingService instead of raw Pathfinder to get validation + auto-fix
-        var pathResult = _pathfindingService.FindPath(snappedStart, snappedTarget.Value, pathfindingExtents);
+        var pathfindStart = new Vector3(snappedStart.X, nearestNavmesh.Value.Y, snappedStart.Z);
+        var pathResult = _pathfindingService.FindPath(pathfindStart, snappedTarget.Value, pathfindingExtents);
         
         Console.WriteLine($"[MovementController] Pathfinding result: Success={pathResult.Success}");
         if (pathResult.Success)
@@ -1001,14 +1000,18 @@ public class MovementController
     private void ReplanPath(PhysicsEntity entity, MovementState state, Vector3 currentPosition)
     {
         Console.WriteLine($"[MovementController] Replanning path for entity {entity.EntityId}");
-        
+
         var extents = new Vector3(
             _config.PathfindingSearchExtentsHorizontal,
             _config.PathfindingSearchExtentsVertical,
             _config.PathfindingSearchExtentsHorizontal
         );
-        // Use PathfindingService for validation + auto-fix during replanning too
-        var pathResult = _pathfindingService.FindPath(currentPosition, state.TargetPosition, extents);
+
+        // Use ground-level Y for the replan start so DotRecast selects the polygon the
+        // agent is actually standing on, not a ledge polygon closer to the capsule center.
+        float halfHeight = (state.AgentHeight / 2.0f) + state.AgentRadius;
+        var groundStart = new Vector3(currentPosition.X, currentPosition.Y - halfHeight, currentPosition.Z);
+        var pathResult = _pathfindingService.FindPath(groundStart, state.TargetPosition, extents);
         
         if (pathResult.Success)
         {
