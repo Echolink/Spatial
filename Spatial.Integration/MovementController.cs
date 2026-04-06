@@ -926,88 +926,84 @@ public class MovementController
 
             var vel = _physicsWorld.GetEntityVelocity(entity);
 
-            // Skip recovery for jumps (vel.Y > 0, moving up) or fast falls / knockback (|vel.Y| > threshold).
-            if (Math.Abs(vel.Y) > recoveryVelocityThreshold)
-                goto airborneRecoveryDone;
-
-            float agentFeetY = currentPosition.Y - agentHalfHeight;
-
-            // Use physics raycast first — the physics mesh Y may differ from navmesh Y by ~0.2 m
-            // due to voxelisation. Snapping to the wrong Y causes a constant bounce loop.
-            float groundSurfaceY;
-            bool foundSurface = false;
-
-            // Start the ray from the TOP of the capsule so it always originates above the
-            // agent's body. If the capsule centre has sunk below the physics surface,
-            // a ray starting only 0.1 m above the centre would already be underground
-            // and miss the surface travelling downward.
-            var rayStart = new Vector3(currentPosition.X, currentPosition.Y + agentHalfHeight + 0.1f, currentPosition.Z);
-            var rayEnd   = new Vector3(currentPosition.X, currentPosition.Y - (fallRecoveryThreshold + agentHalfHeight + 0.5f), currentPosition.Z);
-            if (_physicsWorld.Raycast(rayStart, rayEnd, out var rayHit, out _))
+            // Only recover from spurious AIRBORNE (tiny velY). Jumps and knockback have large
+            // velY and must be left to physics — skip recovery entirely for those.
+            if (Math.Abs(vel.Y) <= recoveryVelocityThreshold)
             {
-                groundSurfaceY = rayHit.Y;
-                foundSurface = true;
-            }
-            else
-            {
-                // Fallback: navmesh query. Use wider horizontal extents (3 m) so we still
-                // find a surface when the agent has drifted laterally off an island edge.
-                var navSurface = _pathfindingService.FindNearestValidPosition(
-                    new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
-                    new Vector3(3.0f, 5.0f, 3.0f));
-                if (navSurface != null)
+                float agentFeetY = currentPosition.Y - agentHalfHeight;
+
+                // Use physics raycast first — the physics mesh Y may differ from navmesh Y by ~0.2 m
+                // due to voxelisation. Snapping to the wrong Y causes a constant bounce loop.
+                float groundSurfaceY;
+                bool foundSurface = false;
+
+                // Start the ray from the TOP of the capsule so it always originates above the
+                // agent's body. If the capsule centre has sunk below the physics surface,
+                // a ray starting only 0.1 m above the centre would already be underground
+                // and miss the surface travelling downward.
+                var rayStart = new Vector3(currentPosition.X, currentPosition.Y + agentHalfHeight + 0.1f, currentPosition.Z);
+                var rayEnd   = new Vector3(currentPosition.X, currentPosition.Y - (fallRecoveryThreshold + agentHalfHeight + 0.5f), currentPosition.Z);
+                if (_physicsWorld.Raycast(rayStart, rayEnd, out var rayHit, out _))
                 {
-                    groundSurfaceY = navSurface.Value.Y;
+                    groundSurfaceY = rayHit.Y;
                     foundSurface = true;
                 }
                 else
                 {
-                    groundSurfaceY = 0f;
+                    // Fallback: navmesh query. Use wider horizontal extents (3 m) so we still
+                    // find a surface when the agent has drifted laterally off an island edge.
+                    var navSurface = _pathfindingService.FindNearestValidPosition(
+                        new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
+                        new Vector3(3.0f, 5.0f, 3.0f));
+                    if (navSurface != null)
+                    {
+                        groundSurfaceY = navSurface.Value.Y;
+                        foundSurface = true;
+                    }
+                    else
+                    {
+                        groundSurfaceY = 0f;
+                    }
                 }
-            }
 
-            if (foundSurface)
-            {
                 // Guard: only snap to a surface near the current target floor.
                 // The navmesh fallback searches up to 5 m in both directions and will find
                 // higher-platform polygons when no physics surface is directly below. Without
                 // this check, the recovery cascades: ground-snap → AIRBORNE → platform-snap →
                 // AIRBORNE → next-platform-snap … until the agent overshoots their real floor.
                 float targetFloorY = targetWaypoint.Y; // navmesh Y of the current waypoint (ground surface)
-                if (Math.Abs(groundSurfaceY - targetFloorY) > 2.0f)
-                    goto airborneRecoveryDone;
-
-                float distAboveSurface = agentFeetY - groundSurfaceY;
-                // Allow recovery even when feet are up to fallRecoveryThreshold below the
-                // surface — the old -agentHalfHeight bound (−1.4 m) was too tight and let
-                // agents sink past it before recovery could act.
-                if (distAboveSurface <= fallRecoveryThreshold && distAboveSurface >= -fallRecoveryThreshold)
+                if (foundSurface && Math.Abs(groundSurfaceY - targetFloorY) <= 2.0f)
                 {
-                    float targetCenterY = groundSurfaceY + agentHalfHeight;
-                    float yDelta = Math.Abs(currentPosition.Y - targetCenterY);
-
-                    // Only teleport when correction is significant enough to matter.
-                    // Teleporting every frame clears BepuPhysics contact manifolds,
-                    // creating a constant AIRBORNE→snap→AIRBORNE cycle.
-                    if (yDelta > 0.05f)
+                    float distAboveSurface = agentFeetY - groundSurfaceY;
+                    // Allow recovery even when feet are up to fallRecoveryThreshold below the
+                    // surface — the old -agentHalfHeight bound (−1.4 m) was too tight and let
+                    // agents sink past it before recovery could act.
+                    if (distAboveSurface <= fallRecoveryThreshold && distAboveSurface >= -fallRecoveryThreshold)
                     {
-                        var snappedCenter = new Vector3(currentPosition.X, targetCenterY, currentPosition.Z);
-                        _physicsWorld.SetEntityPosition(entity, snappedCenter);
-                        _physicsWorld.SetEntityVelocity(entity, new Vector3(vel.X, 0f, vel.Z));
+                        float targetCenterY = groundSurfaceY + agentHalfHeight;
+                        float yDelta = Math.Abs(currentPosition.Y - targetCenterY);
 
-                        Console.WriteLine(
-                            $"[MovementController] Entity {entity.EntityId} fall-recovery snap: " +
-                            $"Y {currentPosition.Y:F2} -> {targetCenterY:F2} " +
-                            $"(physics surface={groundSurfaceY:F2}, dist={distAboveSurface:F2}m)");
+                        // Only teleport when correction is significant enough to matter.
+                        // Teleporting every frame clears BepuPhysics contact manifolds,
+                        // creating a constant AIRBORNE→snap→AIRBORNE cycle.
+                        if (yDelta > 0.05f)
+                        {
+                            var snappedCenter = new Vector3(currentPosition.X, targetCenterY, currentPosition.Z);
+                            _physicsWorld.SetEntityPosition(entity, snappedCenter);
+                            _physicsWorld.SetEntityVelocity(entity, new Vector3(vel.X, 0f, vel.Z));
+
+                            Console.WriteLine(
+                                $"[MovementController] Entity {entity.EntityId} fall-recovery snap: " +
+                                $"Y {currentPosition.Y:F2} -> {targetCenterY:F2} " +
+                                $"(physics surface={groundSurfaceY:F2}, dist={distAboveSurface:F2}m)");
+                        }
+
+                        // Always force GROUNDED when near the surface, even without a position snap.
+                        // This re-establishes grounded state while physics contacts regenerate.
+                        _characterController.SetGrounded(entity);
                     }
-
-                    // Always force GROUNDED when near the surface, even without a position snap.
-                    // This re-establishes grounded state while physics contacts regenerate.
-                    _characterController.SetGrounded(entity);
                 }
             }
-
-            airborneRecoveryDone:;
         }
         // else AIRBORNE with high velocity — jump or knockback, let physics handle the arc fully
     }
