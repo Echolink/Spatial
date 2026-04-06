@@ -98,3 +98,10 @@ artifacts/
 
 # macOS
 .DS_Store
+
+# Temporary development notes and session artifacts
+UPDATE_*.md
+PROJECT_SUMMARY.md
+GAME_SERVER_INTEGRATION.md
+SAMPLE_OUTPUT_EXPLAINED.md
+sample_output.txt

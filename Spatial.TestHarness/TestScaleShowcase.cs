@@ -164,7 +164,6 @@ public static class TestScaleShowcase
             var agentEntities = new List<PhysicsEntity>();
             var spawnPositions = new Dictionary<int, Vector3>(); // entityId -> physics center
 
-            int candidateIndex = 0;
             int failedSnaps = 0;
 
             var (capsuleShape, capsuleInertia) = physicsWorld.CreateCapsuleShapeWithInertia(
