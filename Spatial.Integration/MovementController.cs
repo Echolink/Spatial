@@ -35,6 +35,10 @@ public class MovementController
     private readonly ICharacterController _characterController;
     
     private readonly Dictionary<int, MovementState> _movementStates = new();
+
+    // Recovery tuning constants shared between wrong-floor and airborne recovery paths.
+    private const float RecoveryVelocityThreshold = 2.0f; // m/s — below this = spurious AIRBORNE, above = jump/knockback
+    private const float FloorMatchTolerance       = 2.0f; // m   — surface must be within this Y of the target waypoint floor
     
     /// <summary>
     /// Event fired when an entity reaches its destination
@@ -524,7 +528,7 @@ public class MovementController
             // We skip the navmesh fallback to avoid snapping to a wrong-floor polygon.
             if (_characterController.IsAirborne(entity))
             {
-                if (Math.Abs(preZeroVel.Y) <= 2.0f) // Only correct spurious AIRBORNE, not knockback
+                if (Math.Abs(preZeroVel.Y) <= RecoveryVelocityThreshold)
                 {
                     const float wfRecoveryThreshold = 3.0f;
                     float agentFeetY2 = currentPosition.Y - agentHalfHeight;
@@ -533,8 +537,10 @@ public class MovementController
                     var dStart = new Vector3(currentPosition.X, currentPosition.Y + agentHalfHeight + 0.1f, currentPosition.Z);
                     var dEnd   = new Vector3(currentPosition.X, currentPosition.Y - (wfRecoveryThreshold + agentHalfHeight + 0.5f), currentPosition.Z);
 
-                    // Upward ray: catches surfaces the agent has sunk below (ray starts below feet)
-                    var uStart = new Vector3(currentPosition.X, agentFeetY2 - 0.1f, currentPosition.Z);
+                    // Upward ray: catches surfaces the agent has sunk below.
+                    // Start a full agentHalfHeight below feet so the origin clears the floor
+                    // surface even when sinking — 0.1 m was too shallow and could start inside geometry.
+                    var uStart = new Vector3(currentPosition.X, agentFeetY2 - agentHalfHeight, currentPosition.Z);
                     var uEnd   = new Vector3(currentPosition.X, agentFeetY2 + wfRecoveryThreshold + 1.0f, currentPosition.Z);
 
                     float snapSurfaceY;
@@ -562,7 +568,7 @@ public class MovementController
                         // The upward ray may find a platform or upper-terrace polygon that is NOT
                         // the intended floor. Using the waypoint Y as reference prevents runaway
                         // upward cascades where each snap reveals another platform above.
-                        bool nearTargetFloor = Math.Abs(snapSurfaceY - targetWaypoint.Y) <= 2.0f;
+                        bool nearTargetFloor = Math.Abs(snapSurfaceY - targetWaypoint.Y) <= FloorMatchTolerance;
                         if (nearTargetFloor && dist <= wfRecoveryThreshold && dist >= -wfRecoveryThreshold)
                         {
                             float snapCenterY = snapSurfaceY + agentHalfHeight;
@@ -921,14 +927,13 @@ public class MovementController
             //
             // If velY is large we let physics handle the arc completely.
             // Only when velY is small do we look for a surface to snap back to.
-            const float recoveryVelocityThreshold = 2.0f; // m/s — below this = spurious, above = real physics
-            const float fallRecoveryThreshold     = 3.0f; // m   — max distance above surface to attempt snap
+            const float fallRecoveryThreshold = 3.0f; // m — max distance above surface to attempt snap
 
             var vel = _physicsWorld.GetEntityVelocity(entity);
 
             // Only recover from spurious AIRBORNE (tiny velY). Jumps and knockback have large
             // velY and must be left to physics — skip recovery entirely for those.
-            if (Math.Abs(vel.Y) <= recoveryVelocityThreshold)
+            if (Math.Abs(vel.Y) <= RecoveryVelocityThreshold)
             {
                 float agentFeetY = currentPosition.Y - agentHalfHeight;
 
@@ -950,19 +955,32 @@ public class MovementController
                 }
                 else
                 {
-                    // Fallback: navmesh query. Use wider horizontal extents (3 m) so we still
-                    // find a surface when the agent has drifted laterally off an island edge.
-                    var navSurface = _pathfindingService.FindNearestValidPosition(
-                        new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
-                        new Vector3(3.0f, 5.0f, 3.0f));
-                    if (navSurface != null)
+                    // Upward ray: catches surfaces the agent has sunk below.
+                    // Start a full agentHalfHeight below feet so the origin clears the floor
+                    // surface even when sinking — 0.1 m was too shallow and could start inside geometry.
+                    var upStart = new Vector3(currentPosition.X, agentFeetY - agentHalfHeight, currentPosition.Z);
+                    var upEnd   = new Vector3(currentPosition.X, agentFeetY + fallRecoveryThreshold + 1.0f, currentPosition.Z);
+                    if (_physicsWorld.Raycast(upStart, upEnd, out var upHit, out _))
                     {
-                        groundSurfaceY = navSurface.Value.Y;
+                        groundSurfaceY = upHit.Y;
                         foundSurface = true;
                     }
                     else
                     {
-                        groundSurfaceY = 0f;
+                        // Final fallback: navmesh query. Use wider horizontal extents (3 m) so we
+                        // still find a surface when the agent has drifted laterally off an island edge.
+                        var navSurface = _pathfindingService.FindNearestValidPosition(
+                            new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
+                            new Vector3(3.0f, 5.0f, 3.0f));
+                        if (navSurface != null)
+                        {
+                            groundSurfaceY = navSurface.Value.Y;
+                            foundSurface = true;
+                        }
+                        else
+                        {
+                            groundSurfaceY = 0f;
+                        }
                     }
                 }
 
@@ -972,7 +990,7 @@ public class MovementController
                 // this check, the recovery cascades: ground-snap → AIRBORNE → platform-snap →
                 // AIRBORNE → next-platform-snap … until the agent overshoots their real floor.
                 float targetFloorY = targetWaypoint.Y; // navmesh Y of the current waypoint (ground surface)
-                if (foundSurface && Math.Abs(groundSurfaceY - targetFloorY) <= 2.0f)
+                if (foundSurface && Math.Abs(groundSurfaceY - targetFloorY) <= FloorMatchTolerance)
                 {
                     float distAboveSurface = agentFeetY - groundSurfaceY;
                     // Allow recovery even when feet are up to fallRecoveryThreshold below the
