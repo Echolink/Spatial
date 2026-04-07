@@ -189,4 +189,22 @@ public class PathfindingConfiguration
     /// Default: 2
     /// </summary>
     public int StuckDetectionCount { get; set; } = 2;
+
+    // ── Option D: Tiered Fallback ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Maximum XZ radius (meters) to search for an alternate reachable target
+    /// when the player's requested target is unreachable (Tier 2 fallback).
+    /// Candidates are sampled in rings around the original target position.
+    /// Set to 0 to skip Tier 2 and go directly to directional advance (Tier 3).
+    /// Default: 5.0 meters
+    /// </summary>
+    public float FallbackTargetSearchRadius { get; set; } = 5.0f;
+
+    /// <summary>
+    /// Number of angular samples per ring used in the Tier 2 fallback search.
+    /// Total candidates tested = FallbackTargetSearchSamples × 2 rings.
+    /// Default: 8 (45° apart, two rings = 16 candidates)
+    /// </summary>
+    public int FallbackTargetSearchSamples { get; set; } = 8;
 }

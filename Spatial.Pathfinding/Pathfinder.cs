@@ -76,7 +76,7 @@ namespace Spatial.Pathfinding;
         var pathBuffer = new long[256];
         var pathSpan = new System.Span<long>(pathBuffer);
         var pathStatus = query.FindPath(startRef, endRef, startNearestPt, endNearestPt, filter, pathSpan, out int pathCount, maxPath: 256);
-        
+
         // Check if pathfinding succeeded (DtStatus - use bitwise AND check)
         // Note: DtStatus is a struct, comparison may need different approach
         var successFlag = pathStatus & DtStatus.DT_SUCCESS;
@@ -84,6 +84,12 @@ namespace Spatial.Pathfinding;
         {
             return PathResult.Failed;
         }
+
+        // Detect partial result: DT_PARTIAL_RESULT detail bit = 7 (lower 28 bits).
+        // Set when the target polygon is unreachable — the corridor terminates at the
+        // boundary of the connected component, giving the furthest reachable point.
+        const uint PartialResultDetail = 7u;
+        bool isPartial = (pathStatus.Value & 0x0fffffffu) == PartialResultDetail;
         
         // Extract the actual path
         var path = new long[pathCount];
@@ -125,7 +131,10 @@ namespace Spatial.Pathfinding;
             }
         }
         
-        return new PathResult(true, waypoints, totalLength);
+        if (isPartial)
+            Console.WriteLine($"[Pathfinder] Partial path returned ({waypoints.Count} waypoints) — target unreachable, last waypoint is furthest reachable point");
+
+        return new PathResult(true, waypoints, totalLength, isPartial);
     }
     
     /// <summary>

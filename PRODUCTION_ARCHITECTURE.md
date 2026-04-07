@@ -220,6 +220,90 @@ var motorController = new MotorCharacterController(
 
 ---
 
+## Movement Target Fallback (Option D)
+
+**Added**: 2026-04-06
+
+When a player sends a movement command to an unreachable target (wrong navmesh island,
+off-mesh click, clicked inside a wall), the system now attempts a tiered recovery
+instead of hard-cancelling.
+
+### The Four Tiers
+
+| Tier | Triggers when… | Unit behavior | `WasTargetAdjusted` |
+|------|----------------|---------------|---------------------|
+| **1 — Direct** | Full path to snapped target found | Goes exactly to player's target | `false` |
+| **2 — Nearest reachable near target** | Tier 1 failed; samples ring of candidates around target | Goes to closest reachable point within `FallbackTargetSearchRadius` | `true` |
+| **3 — Furthest reachable toward target** | Tiers 1–2 failed; DotRecast returned a partial corridor | Advances to the island edge in the target's direction | `true` |
+| **4 — Hard cancel** | No reachable position anywhere | Unit stays put, `FailureReason = NoReachablePosition` | — |
+
+### How to Read the Response
+
+```csharp
+var response = movementController.RequestMovement(moveRequest);
+
+if (response.Success)
+{
+    if (response.WasTargetAdjusted)
+    {
+        // Show yellow/warning destination marker instead of green
+        // response.AdjustmentReason is one of:
+        //   "NearestReachableNearTarget"      — Tier 2
+        //   "FurthestReachableTowardTarget"   — Tier 3
+        ShowAdjustedMarker(response.ActualTargetPosition, response.AdjustmentReason);
+    }
+    else
+    {
+        ShowNormalMarker(response.ActualTargetPosition); // Tier 1 — exact target
+    }
+}
+else
+{
+    // Tier 4 hard cancel
+    // response.FailureReason is MovementFailureReason.NoReachablePosition
+    ShowErrorFeedback(response.FailureReason);
+}
+```
+
+### Tuning `PathfindingConfiguration`
+
+```csharp
+var pathfindingConfig = new PathfindingConfiguration
+{
+    // Tier 2 ring search around the original target
+    FallbackTargetSearchRadius  = 5.0f,  // meters — set 0 to skip Tier 2
+    FallbackTargetSearchSamples = 8,     // directions × 2 rings = 16 candidates
+};
+```
+
+- **Increase** `FallbackTargetSearchRadius` for larger maps where targets are often
+  clicked far from the navmesh boundary (e.g., open-world).
+- **Decrease** it (or set 0) if you want strict "exact target or fail" behaviour.
+- `FallbackTargetSearchSamples` rarely needs changing; 8 covers 45° resolution.
+
+### Why Tier 2 Naturally Handles Disconnected Islands
+
+When the target is on a different island, every ring candidate sampled around the
+target is also on that island — all unreachable from the agent. Tier 2 finds nothing
+and falls through to Tier 3 without any special-casing. Tier 3 then uses the partial
+DotRecast corridor (the "furthest reachable toward target" waypoints) that DotRecast
+returns for disconnected targets, advancing the unit to its island's boundary.
+
+### `PathResult.IsPartial`
+
+`Pathfinder.FindPath` now exposes whether DotRecast returned a partial corridor
+(`DT_PARTIAL_RESULT`). You can inspect this directly if needed:
+
+```csharp
+var path = pathfindingService.FindPath(start, end);
+if (path.Success && path.IsPartial)
+{
+    // path.Waypoints ends at the furthest reachable point — not at `end`
+}
+```
+
+---
+
 ## Migration Guide
 
 ### From Velocity-Based to Motor-Based
@@ -336,6 +420,8 @@ MovementController (coordinates everything)
 2. Is path valid? Check `PathSegmentValidator` output
 3. Is agent stuck? Check for collision blocking
 4. Is replanning threshold too high? Lower `ReplanDistanceThreshold`
+5. Was the target adjusted? Check `response.WasTargetAdjusted` and `response.AdjustmentReason`
+   — Tier 3 ("FurthestReachableTowardTarget") means goal is on a disconnected island
 
 ### Issue: Agent moves but not along path
 

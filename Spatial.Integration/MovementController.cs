@@ -315,21 +315,7 @@ public class MovementController
             );
         }
 
-        // Snap target position to navmesh (use provided Y as search starting point)
-        var snappedTarget = _pathfindingService.FindNearestValidPosition(request.TargetPosition, searchExtents);
-        if (snappedTarget == null)
-        {
-            return new MovementResponse(
-                $"Target position not on navmesh (no walkable surface found within search extents)",
-                snappedStart,
-                request.TargetPosition
-            );
-        }
-
-        Console.WriteLine($"[MovementController] Start position: ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
-        Console.WriteLine($"[MovementController] Target position: ({snappedTarget.Value.X:F2}, {snappedTarget.Value.Y:F2}, {snappedTarget.Value.Z:F2})");
-
-        // Find path using ground-level start (navmesh surface Y, not capsule-center Y).
+        // Ground-level start for pathfinding (navmesh surface Y, not capsule-center Y).
         // Passing capsule-center Y to DotRecast causes it to pick the nearest polygon by
         // 3D distance, which may be a ledge or upper terrace polygon instead of the ground
         // polygon the agent is actually standing on.
@@ -339,29 +325,78 @@ public class MovementController
             _config.PathfindingSearchExtentsHorizontal
         );
         var pathfindStart = new Vector3(snappedStart.X, nearestNavmesh.Value.Y, snappedStart.Z);
-        var pathResult = _pathfindingService.FindPath(pathfindStart, snappedTarget.Value, pathfindingExtents);
-        
-        Console.WriteLine($"[MovementController] Pathfinding result: Success={pathResult.Success}");
-        if (pathResult.Success)
+
+        // ── Tier 1: Direct path to snapped target ────────────────────────────
+        var snappedTarget = _pathfindingService.FindNearestValidPosition(request.TargetPosition, searchExtents);
+        PathResult? tier1Result = null;
+
+        if (snappedTarget != null)
         {
-            Console.WriteLine($"[MovementController] Path has {pathResult.Waypoints.Count} waypoints, length={pathResult.TotalLength:F2}");
+            Console.WriteLine($"[MovementController] Target snapped: ({snappedTarget.Value.X:F2}, {snappedTarget.Value.Y:F2}, {snappedTarget.Value.Z:F2})");
+            tier1Result = _pathfindingService.FindPath(pathfindStart, snappedTarget.Value, pathfindingExtents);
+            Console.WriteLine($"[MovementController] Tier 1: Success={tier1Result.Success}, IsPartial={tier1Result.IsPartial}, Waypoints={tier1Result.Waypoints.Count}");
+
+            if (tier1Result.Success && !tier1Result.IsPartial)
+                return CommitMovement(entity, request, snappedStart, snappedTarget.Value, tier1Result, wasAdjusted: false, adjustmentReason: null);
         }
-        
-        if (!pathResult.Success)
+        else
         {
-            return new MovementResponse(
-                $"No valid path found from start to target",
-                snappedStart,
-                snappedTarget.Value
-            );
+            Console.WriteLine($"[MovementController] Tier 1: target not on navmesh within search extents");
         }
-        
-        // Store movement state (use snapped target, not original request)
+
+        // ── Tier 2: Nearest reachable point near original target ─────────────
+        // Samples candidates in two rings around the original target XZ.
+        // Handles: target slightly off-navmesh, complex geometry near target.
+        // Falls through naturally for disconnected islands (all ring candidates unreachable).
+        if (_config.FallbackTargetSearchRadius > 0f)
+        {
+            var tier2 = FindNearestReachableNearTarget(pathfindStart, request.TargetPosition, pathfindingExtents, searchExtents);
+            if (tier2 != null)
+            {
+                Console.WriteLine($"[MovementController] Tier 2: reachable target found at ({tier2.Value.Target.X:F2}, {tier2.Value.Target.Y:F2}, {tier2.Value.Target.Z:F2})");
+                return CommitMovement(entity, request, snappedStart, tier2.Value.Target, tier2.Value.Path, wasAdjusted: true, "NearestReachableNearTarget");
+            }
+            Console.WriteLine($"[MovementController] Tier 2: no reachable candidate near target");
+        }
+
+        // ── Tier 3: Furthest reachable point toward target (partial path) ────
+        // DotRecast returns a partial corridor when the target is on a disconnected island.
+        // The last waypoint is the furthest reachable point in the target direction.
+        if (tier1Result != null && tier1Result.Success && tier1Result.IsPartial && tier1Result.Waypoints.Count > 0)
+        {
+            var partialTarget = tier1Result.Waypoints[^1];
+            Console.WriteLine($"[MovementController] Tier 3: using partial path, advancing to ({partialTarget.X:F2}, {partialTarget.Y:F2}, {partialTarget.Z:F2})");
+            return CommitMovement(entity, request, snappedStart, partialTarget, tier1Result, wasAdjusted: true, "FurthestReachableTowardTarget");
+        }
+
+        // ── Tier 4: Hard cancel ───────────────────────────────────────────────
+        Console.WriteLine($"[MovementController] Tier 4: no reachable position found — cancelling movement");
+        return new MovementResponse(
+            MovementFailureReason.NoReachablePosition,
+            "No reachable position found — target is on a disconnected navmesh region with no path available",
+            snappedStart,
+            request.TargetPosition
+        );
+    }
+
+    /// <summary>
+    /// Commits a resolved path to the movement state and fires the started event.
+    /// Shared by all tiers of Option D.
+    /// </summary>
+    private MovementResponse CommitMovement(
+        PhysicsEntity entity,
+        MovementRequest request,
+        Vector3 snappedStart,
+        Vector3 effectiveTarget,
+        PathResult pathResult,
+        bool wasAdjusted,
+        string? adjustmentReason)
+    {
         var state = new MovementState
         {
             EntityId = request.EntityId,
             OriginalTargetPosition = request.TargetPosition,
-            TargetPosition = snappedTarget.Value, // Use snapped position
+            TargetPosition = effectiveTarget,
             MaxSpeed = request.MaxSpeed,
             AgentHeight = request.AgentHeight,
             AgentRadius = request.AgentRadius,
@@ -372,25 +407,63 @@ public class MovementController
             StartTime = DateTime.UtcNow,
             TotalDistance = pathResult.TotalLength
         };
-        
+
         _movementStates[request.EntityId] = state;
-        
-        // Fire movement started event (use snapped positions)
-        OnMovementStarted?.Invoke(request.EntityId, snappedStart, snappedTarget.Value);
-        
-        // Start moving toward first valid waypoint
+        OnMovementStarted?.Invoke(request.EntityId, snappedStart, effectiveTarget);
+
         if (state.CurrentWaypointIndex < state.Waypoints.Count)
-        {
             MoveTowardWaypoint(entity, state.Waypoints[state.CurrentWaypointIndex], snappedStart, request.MaxSpeed);
+
+        return new MovementResponse(snappedStart, effectiveTarget, pathResult, request.MaxSpeed, wasAdjusted, adjustmentReason);
+    }
+
+    /// <summary>
+    /// Tier 2 fallback: samples candidates in two rings around the original target and
+    /// returns the closest one that has a full (non-partial) reachable path from the agent.
+    /// Returns null if no reachable candidate is found within the search radius.
+    /// </summary>
+    private (Vector3 Target, PathResult Path)? FindNearestReachableNearTarget(
+        Vector3 pathfindStart,
+        Vector3 originalTarget,
+        Vector3 pathExtents,
+        Vector3 snapExtents)
+    {
+        int samples = _config.FallbackTargetSearchSamples;
+        float radius = _config.FallbackTargetSearchRadius;
+        float baseY = originalTarget.Y;
+
+        // Build candidate list: inner ring (radius/2) + outer ring (radius), sorted by distance to originalTarget
+        var candidates = new List<(float dist, Vector3 pos)>(samples * 2);
+        float angleStep = MathF.PI * 2f / samples;
+
+        for (int ring = 1; ring <= 2; ring++)
+        {
+            float r = radius * (ring / 2f);
+            for (int i = 0; i < samples; i++)
+            {
+                float angle = angleStep * i;
+                var candidate = new Vector3(
+                    originalTarget.X + MathF.Cos(angle) * r,
+                    baseY,
+                    originalTarget.Z + MathF.Sin(angle) * r
+                );
+                candidates.Add((Vector3.Distance(candidate, originalTarget), candidate));
+            }
         }
-        
-        // Return success response with actual positions
-        return new MovementResponse(
-            snappedStart,
-            snappedTarget.Value,
-            pathResult,
-            request.MaxSpeed
-        );
+
+        candidates.Sort((a, b) => a.dist.CompareTo(b.dist));
+
+        foreach (var (_, candidate) in candidates)
+        {
+            var snapped = _pathfindingService.FindNearestValidPosition(candidate, snapExtents);
+            if (snapped == null) continue;
+
+            var pathResult = _pathfindingService.FindPath(pathfindStart, snapped.Value, pathExtents);
+            if (pathResult.Success && !pathResult.IsPartial)
+                return (snapped.Value, pathResult);
+        }
+
+        return null;
     }
     
     /// <summary>
