@@ -723,6 +723,30 @@ class Program
                 // Run the game server integration sample — demonstrates the World façade API.
                 GameServerIntegrationSample.Run(ResolvePath("worlds/seperated_land.obj"));
             }
+            else if (args.Length > 0 && args[0].ToLower() == "multi-size")
+            {
+                string meshPath = ResolvePath("worlds/seperated_land.obj");
+                TestMultiSizeAgents.TestSingleConfigBackwardsCompat(meshPath);
+                TestMultiSizeAgents.TestMultiSizeBakeAndSpawn(meshPath);
+                TestMultiSizeAgents.TestEachSizeMovesOnCorrectNavMesh(meshPath);
+                TestMultiSizeAgents.TestCapsuleSizingPerEntity(meshPath);
+                TestMultiSizeAgents.TestUnregisteredConfigFallback(meshPath);
+                TestMultiSizeAgents.TestDespawnCleansUpState(meshPath);
+                TestMultiSizeAgents.TestMixedSizeRoomLifecycle(meshPath);
+                Console.WriteLine("\nAll multi-size scenarios passed.");
+            }
+            else if (args.Length > 0 && args[0].ToLower() == "obstacle-spawn")
+            {
+                string meshPath2 = ResolvePath("worlds/simple_arena.obj");
+                TestObstacleSpawn.TestObstacleSpawnNoOverlap(meshPath2);
+                TestObstacleSpawn.TestObstacleSpawnRejectedByOverlap(meshPath2);
+                TestObstacleSpawn.TestObstacleForceSpawnPushesUnit(meshPath2);
+                TestObstacleSpawn.TestPushedUnitMovementStopped(meshPath2);
+                TestObstacleSpawn.TestMultipleUnitsPushedOut(meshPath2);
+                TestObstacleSpawn.TestDespawnObstacleRestoresWalkability(meshPath2);
+                TestObstacleSpawn.TestRetryAfterRejectionSucceeds(meshPath2);
+                Console.WriteLine("\nAll obstacle-spawn scenarios passed.");
+            }
             else
             {
                 // Run all tests with visualization

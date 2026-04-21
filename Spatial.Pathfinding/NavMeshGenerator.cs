@@ -306,7 +306,9 @@ public class NavMeshGenerator
 
         Console.WriteLine($"[TiledNavMesh] Built {tilesBuilt} non-empty tiles");
         var query = new DtNavMeshQuery(navMesh);
-        return new NavMeshData(navMesh, query, isMultiTile: true, tileSize: tileSize);
+        return new NavMeshData(navMesh, query, isMultiTile: true, tileSize: tileSize,
+            sourceVertices: vertices, sourceIndices: indices, navConfig: navConfig,
+            tileOriginX: bmin.X, tileOriginZ: bmin.Z);
     }
 
     /// <summary>

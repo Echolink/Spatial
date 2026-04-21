@@ -354,11 +354,15 @@ public class PathfindingService
 
         float tileSize = navMeshData.TileSize;
 
-        // Determine tile range that overlaps the AABB of the sphere
-        int txMin = (int)Math.Floor((center.X - radius) / tileSize);
-        int txMax = (int)Math.Floor((center.X + radius) / tileSize);
-        int tzMin = (int)Math.Floor((center.Z - radius) / tileSize);
-        int tzMax = (int)Math.Floor((center.Z + radius) / tileSize);
+        // Tile indices are relative to the navmesh origin, not absolute world coordinates.
+        float origX = navMeshData.TileOriginX;
+        float origZ = navMeshData.TileOriginZ;
+
+        // Determine tile range that overlaps the AABB of the sphere (origin-relative)
+        int txMin = (int)Math.Floor((center.X - radius - origX) / tileSize);
+        int txMax = (int)Math.Floor((center.X + radius - origX) / tileSize);
+        int tzMin = (int)Math.Floor((center.Z - radius - origZ) / tileSize);
+        int tzMax = (int)Math.Floor((center.Z + radius - origZ) / tileSize);
 
         int rebuilt = 0;
         for (int tz = tzMin; tz <= tzMax; tz++)

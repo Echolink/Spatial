@@ -36,13 +36,54 @@ public class NavMeshData
     /// </summary>
     public float TileSize { get; }
 
+    /// <summary>
+    /// Source vertex data (x,y,z triplets) used to build this tiled NavMesh.
+    /// Non-null only when <see cref="IsMultiTile"/> is true.
+    /// Used by <see cref="Integration.PathfindingService.RebuildNavMeshRegion"/> to restore
+    /// tiles after a dynamic obstacle (e.g. a tree resource node) is removed.
+    /// </summary>
+    public float[]? SourceVertices { get; }
+
+    /// <summary>
+    /// Source triangle indices used to build this tiled NavMesh.
+    /// Non-null only when <see cref="IsMultiTile"/> is true.
+    /// </summary>
+    public int[]? SourceIndices { get; }
+
+    /// <summary>
+    /// Tile configuration used when this NavMesh was generated.
+    /// Required when calling <see cref="Integration.PathfindingService.RebuildNavMeshRegion"/>.
+    /// Non-null only when <see cref="IsMultiTile"/> is true.
+    /// </summary>
+    public NavMeshConfiguration? NavConfig { get; }
+
+    /// <summary>
+    /// World-space X origin of the tiled NavMesh (the minimum X of the source geometry bounding box).
+    /// Used to correctly map world positions to tile coordinates during runtime tile rebuilds.
+    /// Zero for monolithic meshes.
+    /// </summary>
+    public float TileOriginX { get; }
+
+    /// <summary>
+    /// World-space Z origin of the tiled NavMesh (the minimum Z of the source geometry bounding box).
+    /// </summary>
+    public float TileOriginZ { get; }
+
     public NavMeshData(DtNavMesh navMesh, DtNavMeshQuery query,
-        bool isMultiTile = false, float tileSize = 0f)
+        bool isMultiTile = false, float tileSize = 0f,
+        float[]? sourceVertices = null, int[]? sourceIndices = null,
+        NavMeshConfiguration? navConfig = null,
+        float tileOriginX = 0f, float tileOriginZ = 0f)
     {
         NavMesh = navMesh;
         Query = query;
         IsMultiTile = isMultiTile;
         TileSize = tileSize;
+        SourceVertices = sourceVertices;
+        SourceIndices = sourceIndices;
+        NavConfig = navConfig;
+        TileOriginX = tileOriginX;
+        TileOriginZ = tileOriginZ;
     }
 
     /// <summary>

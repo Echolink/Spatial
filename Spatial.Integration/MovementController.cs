@@ -36,6 +36,10 @@ public class MovementController
     
     private readonly Dictionary<int, MovementState> _movementStates = new();
 
+    // Per-entity PathfindingService — set at Spawn time for multi-size worlds.
+    // Falls back to the default _pathfindingService for single-config worlds.
+    private readonly Dictionary<int, PathfindingService> _entityServices = new();
+
     // Recovery tuning constants shared between wrong-floor and airborne recovery paths.
     private const float RecoveryVelocityThreshold = 2.0f; // m/s — below this = spurious AIRBORNE, above = jump/knockback
     private const float FloorMatchTolerance       = 2.0f; // m   — surface must be within this Y of the target waypoint floor
@@ -67,6 +71,15 @@ public class MovementController
     /// </summary>
     public event Action<int, Vector3, Vector3>? OnMovementStarted;
     
+    internal void RegisterEntityService(int entityId, PathfindingService service)
+        => _entityServices[entityId] = service;
+
+    internal void UnregisterEntityService(int entityId)
+        => _entityServices.Remove(entityId);
+
+    private PathfindingService ServiceFor(int entityId)
+        => _entityServices.TryGetValue(entityId, out var s) ? s : _pathfindingService;
+
     /// <summary>
     /// Gets the character state for an entity (for testing/debugging).
     /// </summary>
@@ -267,13 +280,15 @@ public class MovementController
         Console.WriteLine($"[MovementController] Agent center: Y={currentPosition.Y:F2}");
         Console.WriteLine($"[MovementController] Ground contact: Y={groundY:F2}");
         
+        var svc = ServiceFor(request.EntityId);
+
         // Check if ground contact point is near a navmesh surface
         // CRITICAL FIX: Use much larger search extents to handle cases where agent spawns
         // far from the nearest walkable navmesh polygon (e.g., off-mesh, in non-walkable areas)
         // Horizontal: 50m should cover most reasonable spawn distances
         // Vertical: 10m should handle multi-level scenarios
         var smallSearchExtents = new Vector3(50.0f, 10.0f, 50.0f);
-        var nearestNavmesh = _pathfindingService.FindNearestValidPosition(groundContactPoint, smallSearchExtents);
+        var nearestNavmesh = svc.FindNearestValidPosition(groundContactPoint, smallSearchExtents);
         
         Vector3 snappedStart;
         if (nearestNavmesh != null)
@@ -327,13 +342,13 @@ public class MovementController
         var pathfindStart = new Vector3(snappedStart.X, nearestNavmesh.Value.Y, snappedStart.Z);
 
         // ── Tier 1: Direct path to snapped target ────────────────────────────
-        var snappedTarget = _pathfindingService.FindNearestValidPosition(request.TargetPosition, searchExtents);
+        var snappedTarget = svc.FindNearestValidPosition(request.TargetPosition, searchExtents);
         PathResult? tier1Result = null;
 
         if (snappedTarget != null)
         {
             Console.WriteLine($"[MovementController] Target snapped: ({snappedTarget.Value.X:F2}, {snappedTarget.Value.Y:F2}, {snappedTarget.Value.Z:F2})");
-            tier1Result = _pathfindingService.FindPath(pathfindStart, snappedTarget.Value, pathfindingExtents);
+            tier1Result = svc.FindPath(pathfindStart, snappedTarget.Value, pathfindingExtents);
             Console.WriteLine($"[MovementController] Tier 1: Success={tier1Result.Success}, IsPartial={tier1Result.IsPartial}, Waypoints={tier1Result.Waypoints.Count}");
 
             if (tier1Result.Success && !tier1Result.IsPartial)
@@ -350,7 +365,7 @@ public class MovementController
         // Falls through naturally for disconnected islands (all ring candidates unreachable).
         if (_config.FallbackTargetSearchRadius > 0f)
         {
-            var tier2 = FindNearestReachableNearTarget(pathfindStart, request.TargetPosition, pathfindingExtents, searchExtents);
+            var tier2 = FindNearestReachableNearTarget(svc, pathfindStart, request.TargetPosition, pathfindingExtents, searchExtents);
             if (tier2 != null)
             {
                 Console.WriteLine($"[MovementController] Tier 2: reachable target found at ({tier2.Value.Target.X:F2}, {tier2.Value.Target.Y:F2}, {tier2.Value.Target.Z:F2})");
@@ -423,6 +438,7 @@ public class MovementController
     /// Returns null if no reachable candidate is found within the search radius.
     /// </summary>
     private (Vector3 Target, PathResult Path)? FindNearestReachableNearTarget(
+        PathfindingService svc,
         Vector3 pathfindStart,
         Vector3 originalTarget,
         Vector3 pathExtents,
@@ -455,10 +471,10 @@ public class MovementController
 
         foreach (var (_, candidate) in candidates)
         {
-            var snapped = _pathfindingService.FindNearestValidPosition(candidate, snapExtents);
+            var snapped = svc.FindNearestValidPosition(candidate, snapExtents);
             if (snapped == null) continue;
 
-            var pathResult = _pathfindingService.FindPath(pathfindStart, snapped.Value, pathExtents);
+            var pathResult = svc.FindPath(pathfindStart, snapped.Value, pathExtents);
             if (pathResult.Success && !pathResult.IsPartial)
                 return (snapped.Value, pathResult);
         }
@@ -515,7 +531,8 @@ public class MovementController
     private void UpdateEntityMovement(PhysicsEntity entity, MovementState state, float deltaTime)
     {
         var currentPosition = _physicsWorld.GetEntityPosition(entity);
-        
+        var svc = ServiceFor(entity.EntityId);
+
         // Calculate agent half-height once (used throughout)
         float agentHalfHeight = (state.AgentHeight * 0.5f) + state.AgentRadius;
         
@@ -817,7 +834,7 @@ public class MovementController
                 // negative dropDistance (destination is above agent) → never triggers.
                 // We must NOT bypass it for high-destination paths — that caused agents
                 // to walk off island edges into void when the target was at Y=7.93.
-                if (WouldFallOffEdge(entity, currentPosition, desiredVelocity, state.AgentRadius))
+                if (WouldFallOffEdge(svc, entity, currentPosition, desiredVelocity, state.AgentRadius))
                 {
                     Console.WriteLine($"[MovementController] Agent {entity.EntityId} at unexpected edge - stopping");
                     _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
@@ -835,33 +852,31 @@ public class MovementController
             var finalVelocity = new Vector3(desiredVelocity.X, currentVelocity.Y, desiredVelocity.Z);
             _physicsWorld.SetEntityVelocity(entity, finalVelocity);
             
-            // CRITICAL FIX: Query navmesh at agent's current XZ position
-            // This gives us the actual surface height where the agent is standing
-            // rather than interpolating between sparse waypoints
-            
-            // SLOPE-AWARE: Use different tolerance and behavior on slopes vs flat ground
-            // On slopes, allow more natural deviation to prevent struggle
-            float heightTolerance = isOnSlope ? 0.15f : 0.05f; // 15cm on slopes, 5cm on flat
-            
-            float targetY;
+            // Query navmesh at current XZ position to get actual surface height under agent.
+            var currentXZ = new Vector3(currentPosition.X, currentPosition.Y, currentPosition.Z);
+            var smallSearchExtents = new Vector3(1.0f, 2.0f, 1.0f);
+            var surfaceAtCurrentPos = svc.FindNearestValidPosition(currentXZ, smallSearchExtents);
+
             float currentGroundY = currentPosition.Y - agentHalfHeight;
-            
-            // On steep slopes, reduce grounding frequency to allow natural physics
-            // Only apply correction every few frames on slopes
-            if (isOnSlope)
+
+            // Use navmesh surface Y at the current XZ position (not the target waypoint Y) to
+            // detect actual slope. Comparing targetWaypoint.Y against feetY produced a false
+            // isOnSlope=true for the entire duration of any path to a higher destination, causing
+            // 4/5 grounding frames to be skipped and gravity to accumulate into freefall.
+            float surfaceYNow = surfaceAtCurrentPos?.Y ?? currentGroundY;
+            float feetToSurface = Math.Abs(surfaceYNow - currentGroundY);
+            bool isActuallyOnSlope = feetToSurface > 0.5f && horizontalDist > 0.1f;
+
+            float heightTolerance = isActuallyOnSlope ? 0.15f : 0.05f;
+
+            float targetY;
+
+            if (isActuallyOnSlope)
             {
                 state.SlopeGroundingFrameCounter++;
                 if (state.SlopeGroundingFrameCounter % 5 != 0)
-                {
-                    // Skip grounding this frame - let physics handle slope naturally
                     return;
-                }
             }
-            
-            // Query navmesh at current XZ position with small search extents
-            var currentXZ = new Vector3(currentPosition.X, currentPosition.Y, currentPosition.Z);
-            var smallSearchExtents = new Vector3(1.0f, 2.0f, 1.0f); // Small horizontal, larger vertical
-            var surfaceAtCurrentPos = _pathfindingService.FindNearestValidPosition(currentXZ, smallSearchExtents);
             
             if (surfaceAtCurrentPos != null)
             {
@@ -872,8 +887,11 @@ public class MovementController
                 float heightError = Math.Abs(currentPosition.Y - targetY);
                 if (heightError < heightTolerance)
                 {
-                    // Already close enough - don't apply grounding force
-                    // This prevents constant micro-adjustments and stuttering
+                    // Entity is at correct height — neutralize downward drift to prevent
+                    // gravity accumulation without applying a corrective force.
+                    var groundedVel = _physicsWorld.GetEntityVelocity(entity);
+                    if (groundedVel.Y < 0f)
+                        _physicsWorld.SetEntityVelocity(entity, new Vector3(groundedVel.X, 0f, groundedVel.Z));
                     return;
                 }
             }
@@ -906,10 +924,12 @@ public class MovementController
                 float interpolatedGroundY = prevPos.Y + (targetWaypoint.Y - prevPos.Y) * progress;
                 targetY = interpolatedGroundY + agentHalfHeight;
                 
-                // Apply damping to interpolation too
                 float heightError = Math.Abs(currentPosition.Y - targetY);
                 if (heightError < heightTolerance)
                 {
+                    var groundedVel = _physicsWorld.GetEntityVelocity(entity);
+                    if (groundedVel.Y < 0f)
+                        _physicsWorld.SetEntityVelocity(entity, new Vector3(groundedVel.X, 0f, groundedVel.Z));
                     return;
                 }
             }
@@ -922,10 +942,10 @@ public class MovementController
             // CRITICAL: Apply grounding even when recovering to prevent sinking
             // Query navmesh at current XZ position to get actual surface height
             const float heightTolerance = 0.05f; // 5cm tolerance
-            
+
             var currentXZ = new Vector3(currentPosition.X, currentPosition.Y, currentPosition.Z);
             var smallSearchExtents = new Vector3(1.0f, 2.0f, 1.0f);
-            var surfaceAtCurrentPos = _pathfindingService.FindNearestValidPosition(currentXZ, smallSearchExtents);
+            var surfaceAtCurrentPos = svc.FindNearestValidPosition(currentXZ, smallSearchExtents);
             
             if (surfaceAtCurrentPos != null)
             {
@@ -1042,7 +1062,7 @@ public class MovementController
                     {
                         // Final fallback: navmesh query. Use wider horizontal extents (3 m) so we
                         // still find a surface when the agent has drifted laterally off an island edge.
-                        var navSurface = _pathfindingService.FindNearestValidPosition(
+                        var navSurface = svc.FindNearestValidPosition(
                             new Vector3(currentPosition.X, agentFeetY, currentPosition.Z),
                             new Vector3(3.0f, 5.0f, 3.0f));
                         if (navSurface != null)
@@ -1150,7 +1170,7 @@ public class MovementController
 
             for (int i = state.CurrentWaypointIndex; i < lookaheadEnd; i++)
             {
-                if (!_pathfinder.IsValidPosition(state.Waypoints[i], snapExtents))
+                if (!ServiceFor(entity.EntityId).Pathfinder.IsValidPosition(state.Waypoints[i], snapExtents))
                 {
                     Console.WriteLine($"[MovementController] Waypoint {i} for entity {entity.EntityId} is no longer on NavMesh, replanning");
                     state.ValidationStuckCount = 0;
@@ -1168,6 +1188,7 @@ public class MovementController
     {
         Console.WriteLine($"[MovementController] Replanning path for entity {entity.EntityId}");
 
+        var svc = ServiceFor(entity.EntityId);
         var extents = new Vector3(
             _config.PathfindingSearchExtentsHorizontal,
             _config.PathfindingSearchExtentsVertical,
@@ -1178,7 +1199,7 @@ public class MovementController
         // agent is actually standing on, not a ledge polygon closer to the capsule center.
         float halfHeight = (state.AgentHeight / 2.0f) + state.AgentRadius;
         var groundStart = new Vector3(currentPosition.X, currentPosition.Y - halfHeight, currentPosition.Z);
-        var pathResult = _pathfindingService.FindPath(groundStart, state.TargetPosition, extents);
+        var pathResult = svc.FindPath(groundStart, state.TargetPosition, extents);
         
         if (pathResult.Success)
         {
@@ -1236,14 +1257,14 @@ public class MovementController
     /// Checks if moving in a direction would cause agent to fall off an edge.
     /// Uses navmesh query to check if ground exists ahead.
     /// </summary>
-    private bool WouldFallOffEdge(PhysicsEntity entity, Vector3 currentPos, Vector3 desiredVelocity, float agentRadius)
+    private bool WouldFallOffEdge(PathfindingService svc, PhysicsEntity entity, Vector3 currentPos, Vector3 desiredVelocity, float agentRadius)
     {
         if (desiredVelocity.Length() < 0.01f)
             return false;
-        
+
         // Check position slightly ahead in movement direction
         Vector3 checkPos = currentPos + Vector3.Normalize(desiredVelocity) * (agentRadius * _config.EdgeCheckDistanceMultiplier);
-        
+
         // CRITICAL FIX: Use much larger horizontal search extents to reliably find navmesh ahead
         // Agent radius (0.5m) is too small for sparse navmesh polygons or moving between edges
         // Query navmesh at check position
@@ -1252,8 +1273,8 @@ public class MovementController
             5.0f, // Search down 5m to find ground
             3.0f  // Increased from agentRadius to 3.0m
         );
-        
-        var groundAhead = _pathfindingService.FindNearestValidPosition(checkPos, searchExtents);
+
+        var groundAhead = svc.FindNearestValidPosition(checkPos, searchExtents);
         
         if (groundAhead == null)
             return true; // No ground ahead - would fall!
@@ -1314,6 +1335,7 @@ public class MovementController
         }
         
         _movementStates.Remove(entityId);
+        _entityServices.Remove(entityId);
         _characterController.RemoveEntity(entityId);
     }
     

@@ -207,7 +207,8 @@ namespace Spatial.Pathfinding;
         float cellSize = agentConfig.Radius / 2.0f;
         float cellHeight = cellSize / 2.0f;
 
-        var (bmin, bmax) = CalculateTileBounds(tileX, tileZ, navConfig.TileSize, agentConfig);
+        var (bmin, bmax) = CalculateTileBounds(tileX, tileZ, navConfig.TileSize, agentConfig,
+            _navMeshData.TileOriginX, _navMeshData.TileOriginZ);
         var geomProvider = new SimpleInputGeomProvider(tileVertices, tileIndices);
         var walkableAreaMod = new DotRecast.Recast.RcAreaModification(0x3f);
 
@@ -248,13 +249,13 @@ namespace Spatial.Pathfinding;
     /// Converts tile coordinates to the Recast bounding box used during generation.
     /// </summary>
     private static (RcVec3f bmin, RcVec3f bmax) CalculateTileBounds(
-        int tileX, int tileZ, float tileSize, AgentConfig agentConfig)
+        int tileX, int tileZ, float tileSize, AgentConfig agentConfig,
+        float originX = 0f, float originZ = 0f)
     {
-        // We don't store the world origin, so use (0,0,0) as baseline.
-        // Tile coords are from CalcTileLoc which is relative to the NavMesh origin.
-        // This works correctly when the game server uses CalcTileLoc to get tile coords.
-        var bmin = new RcVec3f(tileX * tileSize, -1000f, tileZ * tileSize);
-        var bmax = new RcVec3f((tileX + 1) * tileSize, 1000f, (tileZ + 1) * tileSize);
+        // Tile bounds are relative to the navmesh origin (bmin of the source geometry).
+        // Without the origin offset, rebuild bounds would be wrong for meshes not centered at (0,0).
+        var bmin = new RcVec3f(originX + tileX * tileSize, -1000f, originZ + tileZ * tileSize);
+        var bmax = new RcVec3f(originX + (tileX + 1) * tileSize, 1000f, originZ + (tileZ + 1) * tileSize);
         bmin.Y -= agentConfig.CellHeight;
         bmax.Y += agentConfig.Height * 2f;
         return (bmin, bmax);

@@ -41,8 +41,18 @@ public sealed class World : IDisposable
 
     private readonly AgentConfig _agentConfig;
 
+    // Per-config PathfindingServices — populated by the multi-size constructor.
+    private readonly Dictionary<AgentConfig, PathfindingService> _pathfindingServices =
+        new(ReferenceEqualityComparer.Instance);
+
+    // Maps entityId → AgentConfig so Spawn can route to the right service.
+    private readonly Dictionary<int, AgentConfig> _entityConfigs = new();
+
     // Maps entityId → PhysicsEntity so we can look up bodies for queries.
     private readonly Dictionary<int, PhysicsEntity> _entities = new();
+
+    // Tracks spawned obstacles for NavMesh restoration on despawn.
+    private readonly Dictionary<int, ObstacleRecord> _obstacles = new();
 
     // ── Public subsystem access (escape hatches for advanced use) ─────────────
 
@@ -139,6 +149,54 @@ public sealed class World : IDisposable
         Movement.OnMovementProgress  += (id, f)   => OnMovementProgress?.Invoke(id, f);
     }
 
+    /// <summary>
+    /// Creates a world that supports multiple agent sizes.
+    ///
+    /// Each AgentConfig registered in <paramref name="multiNavMesh"/> gets its own
+    /// NavMesh and PathfindingService. Pass the same AgentConfig instance to
+    /// <see cref="Spawn(int, Vector3, AgentConfig, EntityType)"/> at runtime to route
+    /// each unit to its correct NavMesh.
+    ///
+    ///   var navMesh = new MultiAgentNavMesh("worlds/arena.obj")
+    ///       .Add(goblinConfig)
+    ///       .Add(trollConfig)
+    ///       .Bake();
+    ///   using var world = new World(navMesh);
+    ///   world.Spawn(goblinId, pos, goblinConfig);
+    ///   world.Spawn(trollId,  pos, trollConfig);
+    /// </summary>
+    public World(MultiAgentNavMesh multiNavMesh,
+                 PathfindingConfiguration? pfConfig = null,
+                 PhysicsConfiguration? physicsConfig = null)
+    {
+        _agentConfig = multiNavMesh.DefaultConfig;
+        NavMesh = multiNavMesh.NavMeshes[_agentConfig];
+
+        Physics = new PhysicsWorld(physicsConfig ?? new PhysicsConfiguration());
+
+        var config = pfConfig ?? new PathfindingConfiguration();
+
+        // Build one PathfindingService per registered config.
+        PathfindingService? defaultSvc = null;
+        foreach (var (agentConfig, navMeshData) in multiNavMesh.NavMeshes)
+        {
+            var svc = new PathfindingService(new Pathfinder(navMeshData), agentConfig, config);
+            _pathfindingServices[agentConfig] = svc;
+            if (agentConfig == _agentConfig)
+                defaultSvc = svc;
+        }
+
+        Pathfinding = defaultSvc!;
+
+        var motorController = new MotorCharacterController(Physics);
+        Movement = new MovementController(Physics, Pathfinding, _agentConfig, config, motorController);
+
+        Movement.OnMovementStarted   += (id, s, t) => OnMovementStarted?.Invoke(id, s, t);
+        Movement.OnDestinationReached += (id, p)   => OnDestinationReached?.Invoke(id, p);
+        Movement.OnPathReplanned      += id         => OnPathReplanned?.Invoke(id);
+        Movement.OnMovementProgress   += (id, f)   => OnMovementProgress?.Invoke(id, f);
+    }
+
     // ── Static factory helpers ────────────────────────────────────────────────
 
     /// <summary>
@@ -233,17 +291,36 @@ public sealed class World : IDisposable
     /// <returns>The created PhysicsEntity for advanced use (e.g. SetEntityPushable).</returns>
     public PhysicsEntity Spawn(int entityId, Vector3 position,
                                EntityType entityType = EntityType.Player)
+        => SpawnInternal(entityId, position, _agentConfig, entityType);
+
+    /// <summary>
+    /// Spawns a unit with a specific agent size. Use this overload in multi-size worlds.
+    ///
+    /// <paramref name="agentConfig"/> must be the same instance that was passed to
+    /// <see cref="MultiAgentNavMesh.Add"/> before baking — lookup uses reference equality.
+    /// </summary>
+    public PhysicsEntity Spawn(int entityId, Vector3 position,
+                               AgentConfig agentConfig,
+                               EntityType entityType = EntityType.Player)
+        => SpawnInternal(entityId, position, agentConfig, entityType);
+
+    private PhysicsEntity SpawnInternal(int entityId, Vector3 position,
+                                        AgentConfig agentConfig,
+                                        EntityType entityType)
     {
+        // Resolve the PathfindingService for this config (falls back to default).
+        var svc = _pathfindingServices.TryGetValue(agentConfig, out var s) ? s : Pathfinding;
+
         // Snap the requested position to the nearest NavMesh surface.
         // The search uses downward-priority: finds the highest surface below the point first.
         // This ensures consistent floor selection on multi-level maps (bridges, buildings).
-        var snapped = Pathfinding.FindNearestValidPosition(position, new Vector3(5f, 10f, 5f))
+        var snapped = svc.FindNearestValidPosition(position, new Vector3(5f, 10f, 5f))
                       ?? position;
 
         // BepuPhysics capsule shape: Height = cylinder length, Radius = hemisphere radius.
         // Total capsule height = Height + 2 * Radius.
         // Physics center Y = physics surface Y + (Height/2 + Radius) so feet touch the ground.
-        float halfHeight = (_agentConfig.Height / 2f) + _agentConfig.Radius;
+        float halfHeight = (agentConfig.Height / 2f) + agentConfig.Radius;
 
         // The navmesh Y and the physics mesh Y can diverge by ~0.2 m due to voxelisation.
         // Use a short downward raycast to find the actual physics surface beneath the snap point
@@ -260,12 +337,18 @@ public sealed class World : IDisposable
         var center = new Vector3(snapped.X, physicsGroundY + halfHeight, snapped.Z);
 
         var (shape, inertia) = Physics.CreateCapsuleShapeWithInertia(
-            _agentConfig.Radius, _agentConfig.Height, mass: 1f);
+            agentConfig.Radius, agentConfig.Height, mass: 1f);
 
         var entity = Physics.RegisterEntityWithInertia(
             entityId, entityType, center, shape, inertia);
 
         _entities[entityId] = entity;
+        _entityConfigs[entityId] = agentConfig;
+
+        // Register the per-entity PathfindingService so MovementController routes
+        // path queries to the NavMesh that was baked for this agent's dimensions.
+        Movement.RegisterEntityService(entityId, svc);
+
         return entity;
     }
 
@@ -286,7 +369,136 @@ public sealed class World : IDisposable
         {
             Physics.UnregisterEntity(entity);
             _entities.Remove(entityId);
+            _entityConfigs.Remove(entityId);
         }
+    }
+
+    // ── Obstacle Lifecycle ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Spawns a static obstacle (e.g. a tree resource node) at the given position.
+    ///
+    /// Two things happen:
+    ///   1. A static box collider is added to the physics world so moving units are blocked.
+    ///   2. The NavMesh tiles covering the obstacle footprint are rebuilt so the pathfinder
+    ///      routes around the obstacle rather than through it.
+    ///
+    /// OVERLAP HANDLING:
+    ///   If any units occupy the spawn footprint the behaviour depends on forceSpawn:
+    ///   - false (default): spawn is rejected. SpawnResult.Spawned == false and
+    ///     SpawnResult.DisplacedEntityIds lists the blocking unit IDs so the game server
+    ///     can relocate them first, then retry.
+    ///   - true: blocking units are pushed to the nearest point outside the obstacle's
+    ///     footprint before the static body is created. Their movement is stopped;
+    ///     the game server should re-issue Move() if they should resume pathing.
+    ///     SpawnResult.DisplacedEntityIds lists every unit that was moved.
+    ///
+    /// NavMesh tile updates only occur when the world was baked with
+    /// NavMeshConfiguration.EnableTileUpdates = true.
+    /// </summary>
+    /// <param name="entityId">Unique entity ID for this obstacle within the world.</param>
+    /// <param name="position">World-space base position (bottom-centre of the obstacle).</param>
+    /// <param name="size">Bounding box size (width, height, depth).</param>
+    /// <param name="forceSpawn">
+    ///   When true, push overlapping units out of the footprint and spawn unconditionally.
+    ///   When false (default), reject the spawn if any unit would be overlapped.
+    /// </param>
+    public SpawnResult SpawnObstacle(int entityId, Vector3 position, Vector3 size,
+                                     bool forceSpawn = false)
+    {
+        float checkRadius = MathF.Max(size.X, size.Z) * 0.5f + _agentConfig.Radius;
+        var bodyCenter = new Vector3(position.X, position.Y + size.Y * 0.5f, position.Z);
+
+        var overlapping = Physics.GetEntitiesInRadius(bodyCenter, checkRadius)
+            .Where(e => !e.IsStatic && IsInsideObstacleFootprint(
+                            Physics.GetEntityPosition(e), position, size))
+            .ToList();
+
+        if (overlapping.Count > 0 && !forceSpawn)
+            return new SpawnResult(false, null,
+                overlapping.Select(e => e.EntityId).ToList());
+
+        var displaced = new List<int>();
+        foreach (var unit in overlapping)
+        {
+            PushUnitOutOfObstacle(unit, position, size);
+            displaced.Add(unit.EntityId);
+        }
+
+        var (shape, inertia) = Physics.CreateBoxShapeWithInertia(size, mass: 1f);
+        var entity = Physics.RegisterEntityWithInertia(
+            entityId, EntityType.Obstacle, bodyCenter, shape, inertia, isStatic: true);
+        _entities[entityId] = entity;
+
+        float navRadius = MathF.Max(size.X, size.Z) * 0.5f + 1f;
+        _obstacles[entityId] = new ObstacleRecord(position, navRadius, entity);
+
+        if (NavMesh.SourceVertices != null && NavMesh.NavConfig != null)
+            Pathfinding.RebuildNavMeshRegion(position, navRadius, [], [], NavMesh.NavConfig);
+
+        return new SpawnResult(true, entity, displaced);
+    }
+
+    // Returns true if the unit's XZ position falls inside the obstacle's footprint
+    // (expanded by the agent radius to account for capsule width).
+    private bool IsInsideObstacleFootprint(Vector3 unitPos, Vector3 obstacleBase, Vector3 size)
+    {
+        float halfX = size.X * 0.5f + _agentConfig.Radius;
+        float halfZ = size.Z * 0.5f + _agentConfig.Radius;
+        return MathF.Abs(unitPos.X - obstacleBase.X) < halfX
+            && MathF.Abs(unitPos.Z - obstacleBase.Z) < halfZ;
+    }
+
+    // Pushes a unit to the nearest point just outside the obstacle's XZ footprint,
+    // snaps to the NavMesh, and stops its current movement.
+    private void PushUnitOutOfObstacle(PhysicsEntity unit, Vector3 obstacleBase, Vector3 size)
+    {
+        var unitPos = Physics.GetEntityPosition(unit);
+
+        // Add agent radius + small clearance so the capsule edge clears the box.
+        float halfX = size.X * 0.5f + _agentConfig.Radius + 0.1f;
+        float halfZ = size.Z * 0.5f + _agentConfig.Radius + 0.1f;
+
+        float dx = unitPos.X - obstacleBase.X;
+        float dz = unitPos.Z - obstacleBase.Z;
+
+        // Push along the axis of minimum penetration depth.
+        float overlapX = halfX - MathF.Abs(dx);
+        float overlapZ = halfZ - MathF.Abs(dz);
+
+        static float SafeSign(float v) => v >= 0f ? 1f : -1f;
+
+        var pushed = overlapX <= overlapZ
+            ? new Vector3(unitPos.X + SafeSign(dx) * overlapX, unitPos.Y, unitPos.Z)
+            : new Vector3(unitPos.X, unitPos.Y, unitPos.Z + SafeSign(dz) * overlapZ);
+
+        var snapped = Pathfinding.FindNearestValidPosition(pushed, new Vector3(3f, 5f, 3f))
+                      ?? pushed;
+        float halfHeight = (_agentConfig.Height / 2f) + _agentConfig.Radius;
+        var newCenter = new Vector3(snapped.X, snapped.Y + halfHeight, snapped.Z);
+
+        Movement.StopMovement(unit.EntityId);
+        Physics.SetEntityPosition(unit, newCenter);
+    }
+
+    /// <summary>
+    /// Removes a previously spawned obstacle (e.g. a tree that was cut down).
+    ///
+    /// The physics collider is removed and the affected NavMesh tiles are rebuilt
+    /// from the original source geometry, restoring walkability.
+    /// </summary>
+    public void DespawnObstacle(int entityId)
+    {
+        if (!_obstacles.TryGetValue(entityId, out var obs)) return;
+
+        Physics.UnregisterEntity(obs.Entity);
+        _entities.Remove(entityId);
+        _obstacles.Remove(entityId);
+
+        if (NavMesh.SourceVertices != null && NavMesh.NavConfig != null)
+            Pathfinding.RebuildNavMeshRegion(
+                obs.Position, obs.NavRadius,
+                NavMesh.SourceVertices, NavMesh.SourceIndices!, NavMesh.NavConfig);
     }
 
     /// <summary>
@@ -342,8 +554,10 @@ public sealed class World : IDisposable
     /// <param name="speed">Movement speed in meters per second.</param>
     public MovementResponse Move(int entityId, Vector3 target, float speed = 5f)
     {
+        // Use per-entity config so movement grounding uses the correct capsule dimensions.
+        var cfg = _entityConfigs.TryGetValue(entityId, out var c) ? c : _agentConfig;
         return Movement.RequestMovement(new MovementRequest(
-            entityId, target, speed, _agentConfig.Height, _agentConfig.Radius));
+            entityId, target, speed, cfg.Height, cfg.Radius));
     }
 
     /// <summary>
@@ -436,6 +650,25 @@ public sealed class World : IDisposable
     /// </summary>
     public Vector3? SnapToNavMesh(Vector3 position)
         => Pathfinding.FindNearestValidPosition(position, new Vector3(5f, 10f, 5f));
+
+    // ── Private types ─────────────────────────────────────────────────────────
+
+    private readonly record struct ObstacleRecord(Vector3 Position, float NavRadius, PhysicsEntity Entity);
+
+/// <summary>
+/// Result of a <see cref="World.SpawnObstacle"/> call.
+/// </summary>
+/// <param name="Spawned">True if the obstacle was created.</param>
+/// <param name="Entity">The created physics entity, or null if spawn was rejected.</param>
+/// <param name="DisplacedEntityIds">
+///   IDs of units that overlapped the footprint.
+///   If Spawned is false these are the blockers that prevented the spawn.
+///   If Spawned is true these are units that were pushed out (forceSpawn path).
+/// </param>
+public readonly record struct SpawnResult(
+    bool Spawned,
+    PhysicsEntity? Entity,
+    IReadOnlyList<int> DisplacedEntityIds);
 
     // ── IDisposable ───────────────────────────────────────────────────────────
 
