@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.MeshLoading", "Spat
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spatial.MetadataGenerator", "Spatial.MetadataGenerator\Spatial.MetadataGenerator.csproj", "{7810C7FD-CB7F-4A44-A49A-2A380189BA18}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Vtest", "Vtest\Vtest.csproj", "{51772A9A-8F3F-4A15-B23E-C0D483267BE0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -54,5 +56,9 @@ Global
 		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7810C7FD-CB7F-4A44-A49A-2A380189BA18}.Release|Any CPU.Build.0 = Release|Any CPU
+		{51772A9A-8F3F-4A15-B23E-C0D483267BE0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{51772A9A-8F3F-4A15-B23E-C0D483267BE0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{51772A9A-8F3F-4A15-B23E-C0D483267BE0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{51772A9A-8F3F-4A15-B23E-C0D483267BE0}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

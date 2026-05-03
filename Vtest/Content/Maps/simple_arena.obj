@@ -1,0 +1,52 @@
+# Simple Arena for Spatial Project
+# Generated for testing mesh loading system
+
+# Ground plane (20x20)
+o ground
+v -10 0 -10
+v 10 0 -10
+v 10 0 10
+v -10 0 10
+vn 0 1 0
+f 1//1 2//1 3//1
+f 1//1 3//1 4//1
+
+# North wall (along +Z)
+o wall_north
+v -8 0 8
+v 8 0 8
+v 8 3 8
+v -8 3 8
+vn 0 0 -1
+f 5//2 6//2 7//2
+f 5//2 7//2 8//2
+
+# South wall (along -Z)
+o wall_south
+v -8 0 -8
+v 8 0 -8
+v 8 3 -8
+v -8 3 -8
+vn 0 0 1
+f 9//3 10//3 11//3
+f 9//3 11//3 12//3
+
+# East wall (along +X)
+o wall_east
+v 8 0 -8
+v 8 0 8
+v 8 3 8
+v 8 3 -8
+vn -1 0 0
+f 13//4 14//4 15//4
+f 13//4 15//4 16//4
+
+# West wall (along -X)
+o wall_west
+v -8 0 -8
+v -8 0 8
+v -8 3 8
+v -8 3 -8
+vn 1 0 0
+f 17//4 18//4 19//4
+f 17//4 19//4 20//4

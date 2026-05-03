@@ -105,3 +105,21 @@ PROJECT_SUMMARY.md
 GAME_SERVER_INTEGRATION.md
 SAMPLE_OUTPUT_EXPLAINED.md
 sample_output.txt
+
+# Game content assets
+# Keep Wavefront OBJ/MTL map assets even though *.obj is normally ignored as a build artifact.
+!Vtest/
+!Vtest/Content/
+!Vtest/Content/**
+!Vtest/Content/Maps/
+!Vtest/Content/Maps/**
+!Vtest/Content/Maps/**/*.obj
+!Vtest/Content/Maps/**/*.mtl
+
+# Also allow lowercase content/maps variant if used by another project/config.
+!content/
+!content/**
+!content/maps/
+!content/maps/**
+!content/maps/**/*.obj
+!content/maps/**/*.mtl

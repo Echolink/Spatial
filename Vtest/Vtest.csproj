@@ -1,0 +1,40 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Spatial.Physics\Spatial.Physics.csproj" />
+        <ProjectReference Include="..\Spatial.Integration\Spatial.Integration.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <Content Include="content\maps\**\*">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="bin\Debug\net8.0\" />
+      <Folder Include="Content\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Include="bin\Debug\net8.0\Content\Maps\flat_plane.mtl" />
+      <None Include="bin\Debug\net8.0\Content\Maps\flat_plane.obj" />
+      <None Include="bin\Debug\net8.0\Content\Maps\seperated_land.obj" />
+      <None Include="bin\Debug\net8.0\Content\Maps\seperated_land_with_link.obj" />
+      <None Include="bin\Debug\net8.0\Content\Maps\simple_arena.obj" />
+      <None Include="bin\Debug\net8.0\Content\Maps\simple_ground.obj" />
+      <None Include="obj\Debug\net8.0\Content\Maps\flat_plane.mtl" />
+      <None Include="obj\Debug\net8.0\Content\Maps\flat_plane.obj" />
+      <None Include="obj\Debug\net8.0\Content\Maps\seperated_land.obj" />
+      <None Include="obj\Debug\net8.0\Content\Maps\seperated_land_with_link.obj" />
+      <None Include="obj\Debug\net8.0\Content\Maps\simple_arena.obj" />
+      <None Include="obj\Debug\net8.0\Content\Maps\simple_ground.obj" />
+    </ItemGroup>
+
+</Project>
