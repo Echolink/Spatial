@@ -11,7 +11,10 @@ namespace Spatial.Unity
         [Header("NavMesh Visualization")]
         public bool showNavMesh = true;
         public Material navMeshMaterial;
-        public Color navMeshColor = new Color(0.2f, 0.8f, 0.2f, 0.3f);
+        public Color navMeshColor = new Color(0.2f, 0.8f, 0.2f, 0.5f);
+
+        [Tooltip("Vertical lift above terrain to prevent Z-fighting (meters)")]
+        public float navMeshYLift = 0.06f;
         
         [Header("Path Visualization")]
         public bool showPath = true;
@@ -104,7 +107,8 @@ namespace Spatial.Unity
                 var v = navMesh.Vertices[i];
                 if (v.Length >= 3)
                 {
-                    vertices[i] = new Vector3(-v[0], v[1], v[2]);
+                    // Lift slightly above terrain to prevent Z-fighting
+                    vertices[i] = new Vector3(-v[0], v[1] + navMeshYLift, v[2]);
                 }
             }
             

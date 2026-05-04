@@ -556,7 +556,7 @@ public class PhysicsWorld : IDisposable
         Console.WriteLine($"[PhysicsWorld]   Size: ({size.X:F2}, {size.Y:F2}, {size.Z:F2})");
         
         // Register as static entity with mesh collision
-        return RegisterEntity(entityId, entityType, position, meshShape, isStatic: true);
+        return RegisterEntityWithInertia(entityId, entityType, position, meshShape, default, isStatic: true);
     }
     
     /// <summary>
@@ -607,7 +607,7 @@ public class PhysicsWorld : IDisposable
         var normalizedDir = direction / maxDistance;
         var handler = new RaycastHitHandler(_entityRegistry, maxDistance);
 
-        _simulation.RayCast(ref start, ref normalizedDir, maxDistance, ref handler, 0);
+        _simulation.RayCast(in start, in normalizedDir, maxDistance, ref handler, 0);
 
         if (handler.HitSomething)
         {

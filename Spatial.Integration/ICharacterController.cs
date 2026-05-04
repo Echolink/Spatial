@@ -1,4 +1,5 @@
 using Spatial.Physics;
+using Spatial.Pathfinding;
 using System.Numerics;
 
 namespace Spatial.Integration;
@@ -73,4 +74,16 @@ public interface ICharacterController
     /// Cleans up state for a removed entity.
     /// </summary>
     void RemoveEntity(int entityId);
+
+    /// <summary>
+    /// Initiates kinematic arc traversal of an off-mesh link.
+    /// For Teleport links, the entity is moved instantly and state becomes RECOVERING.
+    /// </summary>
+    void BeginLinkTraversal(PhysicsEntity entity, Vector3 entry, Vector3 exit, OffMeshLinkType type);
+
+    /// <summary>
+    /// Returns traversal type and normalized progress [0,1] for an entity currently in LINK_TRAVERSAL,
+    /// or null if the entity is not traversing a link.
+    /// </summary>
+    (OffMeshLinkType Type, float T)? GetTraversalInfo(int entityId);
 }

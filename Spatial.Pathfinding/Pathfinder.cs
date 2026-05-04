@@ -1,8 +1,10 @@
 using DotRecast.Detour;
 using DotRecast.Core;
 using DotRecast.Core.Numerics;
+using DotRecast.Recast;
 using System.Numerics;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Spatial.Pathfinding;
 
@@ -14,6 +16,7 @@ namespace Spatial.Pathfinding;
     {
         private readonly NavMeshData _navMeshData;
         private readonly NavMeshGenerator _generator = new();
+        private readonly IReadOnlyList<OffMeshLinkDef> _offMeshLinks;
 
         /// <summary>
         /// Gets the navigation mesh data (exposed for spawn validation).
@@ -23,9 +26,11 @@ namespace Spatial.Pathfinding;
         /// <summary>
         /// Creates a new pathfinder using the provided navigation mesh.
         /// </summary>
-        public Pathfinder(NavMeshData navMeshData)
+        /// <param name="offMeshLinks">Link definitions used to annotate waypoints in FindPath results.</param>
+        public Pathfinder(NavMeshData navMeshData, IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
         {
             _navMeshData = navMeshData;
+            _offMeshLinks = offMeshLinks ?? Array.Empty<OffMeshLinkDef>();
         }
     
     /// <summary>
@@ -110,31 +115,44 @@ namespace Spatial.Pathfinding;
             return PathResult.Failed;
         }
         
-        // Convert DtStraightPath waypoints to Vector3
-        var waypoints = new List<Vector3>();
+        // Convert DtStraightPath waypoints to Vector3 and annotate off-mesh link entries
+        var waypoints  = new List<Vector3>();
+        var linkTypes  = new List<OffMeshLinkType?>();
         float totalLength = 0f;
-        
+
         for (int i = 0; i < straightPathCount; i++)
         {
-            var straightPath = straightPathBuffer[i];
-            var waypoint = straightPath.pos;
-            waypoints.Add(new Vector3(waypoint.X, waypoint.Y, waypoint.Z));
-            
-            // Calculate path length
+            var sp  = straightPathBuffer[i];
+            var pos = new Vector3(sp.pos.X, sp.pos.Y, sp.pos.Z);
+            waypoints.Add(pos);
+
+            bool isLink = (sp.flags & DtStraightPathFlags.DT_STRAIGHTPATH_OFFMESH_CONNECTION) != 0;
+            if (isLink && _offMeshLinks.Count > 0)
+            {
+                var def = _offMeshLinks.MinBy(l => MathF.Min(
+                    Vector3.DistanceSquared(l.Start, pos),
+                    Vector3.DistanceSquared(l.End,   pos)));
+                linkTypes.Add(def?.Type);
+            }
+            else
+            {
+                linkTypes.Add(null);
+            }
+
             if (i > 0)
             {
                 var prev = straightPathBuffer[i - 1].pos;
-                var dx = waypoint.X - prev.X;
-                var dy = waypoint.Y - prev.Y;
-                var dz = waypoint.Z - prev.Z;
+                var dx = sp.pos.X - prev.X;
+                var dy = sp.pos.Y - prev.Y;
+                var dz = sp.pos.Z - prev.Z;
                 totalLength += (float)System.Math.Sqrt(dx * dx + dy * dy + dz * dz);
             }
         }
-        
+
         if (isPartial)
             Console.WriteLine($"[Pathfinder] Partial path returned ({waypoints.Count} waypoints) — target unreachable, last waypoint is furthest reachable point");
 
-        return new PathResult(true, waypoints, totalLength, isPartial);
+        return new PathResult(true, waypoints, totalLength, isPartial, linkTypes);
     }
     
     /// <summary>
@@ -176,7 +194,8 @@ namespace Spatial.Pathfinding;
     /// <returns>True if the tile was rebuilt successfully.</returns>
     public bool RebuildTile(int tileX, int tileZ,
         float[] tileVertices, int[] tileIndices,
-        AgentConfig agentConfig, NavMeshConfiguration navConfig)
+        AgentConfig agentConfig, NavMeshConfiguration navConfig,
+        RcConvexVolume? obstacleVolume = null)
     {
         if (!_navMeshData.IsMultiTile)
         {
@@ -203,23 +222,56 @@ namespace Spatial.Pathfinding;
             return true; // Tile removed, nothing to add
         }
 
-        // Build new tile
+        // Build new tile — use the same tiled config as GenerateTiledNavMesh so portal edges
+        // at tile boundaries survive agent-radius erosion.
         float cellSize = agentConfig.Radius / 2.0f;
         float cellHeight = cellSize / 2.0f;
+        float tileSize = navConfig.TileSize;
 
-        var (bmin, bmax) = CalculateTileBounds(tileX, tileZ, navConfig.TileSize, agentConfig,
-            _navMeshData.TileOriginX, _navMeshData.TileOriginZ);
+        int tileSizeVoxels = (int)MathF.Round(tileSize / cellSize);
+        int borderSize     = (int)MathF.Ceiling(agentConfig.Radius / cellSize) + 3;
+
+        // Reconstruct the world-origin bmin from stored origin + known Y padding.
+        var worldBmin = new RcVec3f(_navMeshData.TileOriginX, _navMeshData.WorldBminY, _navMeshData.TileOriginZ);
+        var worldBmax = new RcVec3f(worldBmin.X + 99999f, _navMeshData.WorldBmaxY, worldBmin.Z + 99999f);
+
         var geomProvider = new SimpleInputGeomProvider(tileVertices, tileIndices);
+        if (obstacleVolume != null)
+            geomProvider.AddConvexVolume(obstacleVolume);
+
+        // Re-bake off-mesh connections whose START XZ falls in this tile so links survive rebuilds.
+        float tileMinX = _navMeshData.TileOriginX + tileX * tileSize;
+        float tileMaxX = tileMinX + tileSize;
+        float tileMinZ = _navMeshData.TileOriginZ + tileZ * tileSize;
+        float tileMaxZ = tileMinZ + tileSize;
+        if (_navMeshData.OffMeshLinks != null)
+        {
+            foreach (var link in _navMeshData.OffMeshLinks)
+            {
+                if (link.Start.X >= tileMinX && link.Start.X <= tileMaxX &&
+                    link.Start.Z >= tileMinZ && link.Start.Z <= tileMaxZ)
+                {
+                    var s = new DotRecast.Core.Numerics.RcVec3f(link.Start.X, link.Start.Y, link.Start.Z);
+                    var e = new DotRecast.Core.Numerics.RcVec3f(link.End.X,   link.End.Y,   link.End.Z);
+                    geomProvider.AddOffMeshConnection(s, e, agentConfig.Radius * 2f, bidir: true, area: 63, flags: 1);
+                }
+            }
+        }
+
         var walkableAreaMod = new DotRecast.Recast.RcAreaModification(0x3f);
 
+        float minRegionArea   = cellSize * cellSize;
+        float mergeRegionArea = 16f * cellSize * cellSize;
         var config = new DotRecast.Recast.RcConfig(
+            useTiles: true, tileSizeX: tileSizeVoxels, tileSizeZ: tileSizeVoxels, borderSize: borderSize,
             DotRecast.Recast.RcPartition.WATERSHED, cellSize, cellHeight,
             agentConfig.MaxSlope, agentConfig.Height, agentConfig.Radius, agentConfig.MaxClimb,
-            1, 4, agentConfig.Radius * 8.0f, 1.3f, 6,
+            minRegionArea, mergeRegionArea,
+            agentConfig.Radius * 8.0f, 1.3f, 6,
             cellSize * 6.0f, cellHeight,
             true, true, true, walkableAreaMod, true);
 
-        var builderConfig = new DotRecast.Recast.RcBuilderConfig(config, bmin, bmax);
+        var builderConfig = new DotRecast.Recast.RcBuilderConfig(config, worldBmin, worldBmax, tileX, tileZ);
         var builder = new DotRecast.Recast.RcBuilder();
         var buildResult = builder.Build(geomProvider, builderConfig, keepInterResults: false);
 
@@ -230,7 +282,20 @@ namespace Spatial.Pathfinding;
             return true; // Tile is now empty (geometry was removed)
         }
 
-        var tileData = _generator.BuildTileData(buildResult, config, agentConfig, tileX, tileZ);
+        // Extract off-mesh connections from the geomProvider and filter to this tile's bounds,
+        // mirroring what GenerateTiledNavMesh does so links are embedded in the DtMeshData.
+        System.Collections.Generic.List<DotRecast.Recast.Geom.RcOffMeshConnection>? tileConns = null;
+        var allConns = geomProvider.GetOffMeshConnections();
+        if (allConns.Count > 0)
+        {
+            tileConns = allConns
+                .Where(c => c.verts[0] >= tileMinX && c.verts[0] <= tileMaxX
+                         && c.verts[2] >= tileMinZ && c.verts[2] <= tileMaxZ)
+                .ToList();
+            if (tileConns.Count == 0) tileConns = null;
+        }
+
+        var tileData = _generator.BuildTileData(buildResult, config, agentConfig, tileX, tileZ, tileConns);
         if (tileData == null)
         {
             Console.WriteLine($"[Pathfinder] RebuildTile ({tileX},{tileZ}): BuildTileData returned null");
@@ -245,19 +310,4 @@ namespace Spatial.Pathfinding;
         return true;
     }
 
-    /// <summary>
-    /// Converts tile coordinates to the Recast bounding box used during generation.
-    /// </summary>
-    private static (RcVec3f bmin, RcVec3f bmax) CalculateTileBounds(
-        int tileX, int tileZ, float tileSize, AgentConfig agentConfig,
-        float originX = 0f, float originZ = 0f)
-    {
-        // Tile bounds are relative to the navmesh origin (bmin of the source geometry).
-        // Without the origin offset, rebuild bounds would be wrong for meshes not centered at (0,0).
-        var bmin = new RcVec3f(originX + tileX * tileSize, -1000f, originZ + tileZ * tileSize);
-        var bmax = new RcVec3f(originX + (tileX + 1) * tileSize, 1000f, originZ + (tileZ + 1) * tileSize);
-        bmin.Y -= agentConfig.CellHeight;
-        bmax.Y += agentConfig.Height * 2f;
-        return (bmin, bmax);
-    }
 }

@@ -28,6 +28,10 @@ public class EntityState
     public bool IsStatic { get; set; }
     public string ShapeType { get; set; } = "Box"; // Box, Capsule, Sphere, etc.
     public MeshGeometry? Mesh { get; set; } // Optional mesh data for mesh entities
+
+    // Off-mesh link traversal (broadcast to Unity for animation sync)
+    public string TraversalType { get; set; } = "none"; // "none", "Jump", "Climb", "Teleport"
+    public float TraversalT { get; set; } = 0f;         // Normalized arc progress [0,1]
 }
 
 /// <summary>

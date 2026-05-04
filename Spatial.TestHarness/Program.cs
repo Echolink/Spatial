@@ -747,6 +747,23 @@ class Program
                 TestObstacleSpawn.TestRetryAfterRejectionSucceeds(meshPath2);
                 Console.WriteLine("\nAll obstacle-spawn scenarios passed.");
             }
+            else if (args.Length > 0 && args[0].ToLower() == "obstacle-rebake-visual")
+            {
+                // Scenario 1: Visual obstacle rebake — agent walks, obstacle spawns mid-path,
+                // local NavMesh tile rebuilds, agent replans, obstacle despawns, agent uses direct route.
+                string? meshOverride = args.Length > 1 ? args[1] : null;
+                TestObstacleRebakeVisual.Run(vizServer, meshOverride);
+            }
+            else if (args.Length > 0 && args[0].ToLower() == "combined")
+            {
+                // Scenario 3: Off-mesh links + obstacle rebake in one scene.
+                // Tiled NavMesh baked with off-mesh links from seperated_land_with_link.obj.
+                // Agent-1 uses flat terrain (obstacle blocks it at t=5s).
+                // Agent-2 traverses the jump link.
+                // Agent-3 traverses the teleport link.
+                string? meshOverride = args.Length > 1 ? args[1] : null;
+                TestCombinedShowcase.Run(vizServer, meshOverride);
+            }
             else
             {
                 // Run all tests with visualization
@@ -810,11 +827,12 @@ class Program
             // Step 2: Create ground plane
             Console.WriteLine("2. Creating ground plane...");
             var groundShape = physicsWorld.CreateBoxShape(new Vector3(20, 0.1f, 20));
-            physicsWorld.RegisterEntity(
+            physicsWorld.RegisterEntityWithInertia(
                 entityId: 1000,
                 entityType: EntityType.StaticObject,
                 position: new Vector3(0, -0.05f, 0),
                 shape: groundShape,
+                inertia: default,
                 isStatic: true
             );
             Console.WriteLine("   ✓ Ground plane created\n");
@@ -1946,11 +1964,12 @@ f 29//9 31//9 32//9
     {
         // Create a thin ground plane (reduce height to make it more like a floor)
         var groundShape = physicsWorld.CreateBoxShape(new Vector3(20, 0.1f, 20));
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1000,
             entityType: EntityType.StaticObject,
             position: new Vector3(0, -0.05f, 0), // Ground surface at y=0
             shape: groundShape,
+            inertia: default,
             isStatic: true
         );
         
@@ -1959,46 +1978,51 @@ f 29//9 31//9 32//9
         var wallShape = physicsWorld.CreateBoxShape(new Vector3(1, 3, 1));
         
         // Corner walls
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1001,
             entityType: EntityType.StaticObject,
             position: new Vector3(7, 1.5f, 7),
             shape: wallShape,
+            inertia: default,
             isStatic: true
         );
         
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1002,
             entityType: EntityType.StaticObject,
             position: new Vector3(-7, 1.5f, 7),
             shape: wallShape,
+            inertia: default,
             isStatic: true
         );
         
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1003,
             entityType: EntityType.StaticObject,
             position: new Vector3(7, 1.5f, -7),
             shape: wallShape,
+            inertia: default,
             isStatic: true
         );
         
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1004,
             entityType: EntityType.StaticObject,
             position: new Vector3(-7, 1.5f, -7),
             shape: wallShape,
+            inertia: default,
             isStatic: true
         );
         
         // Create a TALL and WIDE wall obstacle in the middle to force pathfinding around it
         // This wall must block the navmesh completely to force the agent to navigate around
         var largeWallShape = physicsWorld.CreateBoxShape(new Vector3(1, 5, 8)); // 1m thick, 5m tall, 8m wide (Z-axis)
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1005,
             entityType: EntityType.StaticObject,
             position: new Vector3(0, 2.5f, 0), // Centered between start (-5,1,0) and goal (6,1,0)
             shape: largeWallShape,
+            inertia: default,
             isStatic: true
         );
     }

@@ -221,7 +221,8 @@ public sealed class World : IDisposable
     /// <param name="agentConfig">Agent dimensions — must match the config used when creating World.</param>
     /// <param name="navConfig">Optional tile configuration for runtime NavMesh updates.</param>
     public static NavMeshData BakeNavMesh(string meshFilePath, AgentConfig agentConfig,
-                                          NavMeshConfiguration? navConfig = null)
+                                          NavMeshConfiguration? navConfig = null,
+                                          IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         // A temporary PhysicsWorld is used only to load the mesh and extract vertex data.
         // It is disposed immediately — only the baked NavMeshData is kept.
@@ -231,8 +232,8 @@ public sealed class World : IDisposable
 
         var builder = new NavMeshBuilder(tempPhysics, new NavMeshGenerator());
         return navConfig?.EnableTileUpdates == true
-            ? builder.BuildTiledNavMeshDirect(agentConfig, navConfig)
-            : builder.BuildNavMeshDirect(agentConfig);
+            ? builder.BuildTiledNavMeshDirect(agentConfig, navConfig, offMeshLinks)
+            : builder.BuildNavMeshDirect(agentConfig, offMeshLinks);
     }
 
     /// <summary>

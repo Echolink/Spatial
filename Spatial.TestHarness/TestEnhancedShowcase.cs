@@ -88,7 +88,7 @@ public static class TestEnhancedShowcase
             Console.WriteLine("✓ Physics world initialized");
 
             // Load world geometry
-            meshPath ??= ResolvePath("worlds/seperated_land.obj");
+            meshPath ??= ResolvePath("worlds/seperated_land_with_link.obj");
             WorldData? worldData = null;
 
             if (File.Exists(meshPath))
@@ -155,7 +155,7 @@ public static class TestEnhancedShowcase
             {
                 // We have loaded mesh data - use direct approach for best quality
                 Console.WriteLine("Using direct navmesh generation (loaded mesh)");
-                navMeshData = navMeshBuilder.BuildNavMeshDirect(agentConfig);
+                navMeshData = navMeshBuilder.BuildNavMeshDirect(agentConfig, worldData.OffMeshLinks);
             }
             else
             {
@@ -201,7 +201,7 @@ public static class TestEnhancedShowcase
             Console.WriteLine("══════════════════════════════════════════════════════════════");
             Console.WriteLine();
 
-            var pathfinder = new Pathfinder(navMeshData);
+            var pathfinder = new Pathfinder(navMeshData, worldData?.OffMeshLinks);
             var pathfindingConfig = new PathfindingConfiguration();
             var pathfindingService = new PathfindingService(pathfinder, agentConfig, pathfindingConfig);
             
@@ -537,7 +537,7 @@ public static class TestEnhancedShowcase
                         }
                         
                         // Validate path continuity
-                        bool pathValid = ValidatePathContinuity(pathResult.Waypoints);
+                        bool pathValid = ValidatePathContinuity(pathResult.Waypoints, pathResult.OffMeshLinkTypes);
                         
                         if (pathValid)
                         {
@@ -599,8 +599,8 @@ public static class TestEnhancedShowcase
             for (int i = 0; i < steps; i++)
             {
                 currentStep = i + 1;
-                movementController.UpdateMovement(0.008f);
                 physicsWorld.Update(0.008f);
+                movementController.UpdateMovement(0.008f);
                 
                 // FIXED: Keep failed agents stationary AND maintain correct Y position
                 // Failed agents have gravity enabled but no pathfinding, so they need explicit Y correction
@@ -672,8 +672,11 @@ public static class TestEnhancedShowcase
                 // Broadcast visualization state with agent waypoints
                 var mainAgentId = agentEntities.Count > 0 ? agentEntities[0].EntityId : 0;
                 var state = SimulationStateBuilder.BuildFromPhysicsWorld(
-                    physicsWorld, navMeshData, null, mainAgentId
-                );
+                    physicsWorld, navMeshData, null, mainAgentId,
+                    id => {
+                        var info = motorController.GetTraversalInfo(id);
+                        return info.HasValue ? (info.Value.Type.ToString(), info.Value.T) : null;
+                    });
                 
                 // Add waypoints for all agents
                 int totalPathsAdded = 0;
@@ -1141,21 +1144,21 @@ public static class TestEnhancedShowcase
         {
             // Server-specified spawn positions (XZ coordinates are intentional, Y will be validated against terrain)
             // These represent actual game spawn points - e.g., team bases, objectives, respawn locations
-            (101, "Agent-1 [Center→North]", 
-                new Vector3(4.82f, baseY, -5.79f),  // Use baseY as initial guess, will be snapped to actual terrain
-                new Vector3(1.16f, baseY, 5.67f)
+            (101, "Agent-1 [JumpLink fwd]",
+                new Vector3(53.32f, -2.60f, -5.03f),  // 2m run-up from jump entry (A island)
+                new Vector3(46.27f, -2.30f, -16.45f)  // jump link exit (B island)
                 ),
-            (102, "Agent-2 [Center→South]", 
-                new Vector3(23.8f, baseY, 17.78f), 
-                new Vector3(-21f, baseY, -3.93f)
+            (102, "Agent-2 [JumpLink fwd]",
+                new Vector3(53.32f, -2.60f, -7.03f),  // jump link entry (exact A)
+                new Vector3(46.27f, -2.30f, -16.45f)  // jump link exit (exact B)
                 ),
-            (103, "Agent-3 [Center→East]", 
-                new Vector3(51.89f, 0.29f, 10.19f), 
-                new Vector3(45.33f, 8, 18.96f)
+            (103, "Agent-3 [JumpLink rev]",
+                new Vector3(46.27f, -2.30f, -14.45f), // 2m run-up from jump exit (B island)
+                new Vector3(53.32f, -2.60f, -5.03f)   // 2m past jump entry (A island)
                 ),
-            (104, "Agent-4 [West→Center]", 
-                new Vector3(51.2f, baseY, -42.6f),  // Keep server's desired XZ, Y will be corrected
-                new Vector3(33.26f, baseY, -23.13f)
+            (104, "Agent-4 [NW→Center]",
+                new Vector3(-2.0f, baseY, 8.0f),
+                new Vector3(5.0f, baseY, -5.0f)
                 ),
             (105, "Agent-5 [ShortDiag-NE]", 
                 new Vector3(safeMin.X, baseY, safeMin.Z), 
@@ -1286,13 +1289,19 @@ public static class TestEnhancedShowcase
     /// Validates path continuity to detect holes and gaps before movement.
     /// Returns false if path has large vertical discontinuities indicating holes/gaps.
     /// </summary>
-    private static bool ValidatePathContinuity(IReadOnlyList<Vector3> waypoints)
+    private static bool ValidatePathContinuity(
+        IReadOnlyList<Vector3> waypoints,
+        IReadOnlyList<OffMeshLinkType?>? offMeshLinkTypes = null)
     {
         if (waypoints.Count < 2)
-            return true; // Single waypoint is always valid
-        
+            return true;
+
         for (int i = 1; i < waypoints.Count; i++)
         {
+            // Off-mesh link transitions are kinematic — skip geometry checks for those segments.
+            if (offMeshLinkTypes != null && (i - 1) < offMeshLinkTypes.Count && offMeshLinkTypes[i - 1] != null)
+                continue;
+
             var heightDiff = Math.Abs(waypoints[i].Y - waypoints[i - 1].Y);
             var horizontalDist = Vector2.Distance(
                 new Vector2(waypoints[i].X, waypoints[i].Z),
@@ -1346,11 +1355,12 @@ public static class TestEnhancedShowcase
     {
         // Large ground plane
         var groundShape = physicsWorld.CreateBoxShape(new Vector3(30, 0.1f, 30));
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 1000,
             entityType: EntityType.StaticObject,
             position: new Vector3(0, -0.05f, 0),
             shape: groundShape,
+            inertia: default,
             isStatic: true
         );
 
@@ -1368,11 +1378,12 @@ public static class TestEnhancedShowcase
         int entityId = 1001;
         foreach (var pos in wallPositions)
         {
-            physicsWorld.RegisterEntity(
+            physicsWorld.RegisterEntityWithInertia(
                 entityId: entityId++,
                 entityType: EntityType.StaticObject,
                 position: pos,
                 shape: wallShape,
+                inertia: default,
                 isStatic: true
             );
         }

@@ -1,5 +1,6 @@
 using DotRecast.Detour;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -69,11 +70,26 @@ public class NavMeshData
     /// </summary>
     public float TileOriginZ { get; }
 
+    /// <summary>World Y floor used when building the tiled NavMesh (bmin.Y including padding).</summary>
+    public float WorldBminY { get; }
+
+    /// <summary>World Y ceiling used when building the tiled NavMesh (bmax.Y including padding).</summary>
+    public float WorldBmaxY { get; }
+
+    /// <summary>
+    /// Off-mesh link definitions used when this tiled NavMesh was built.
+    /// Re-baked into each tile during runtime tile rebuilds so links survive obstacle updates.
+    /// Non-null only when <see cref="IsMultiTile"/> is true and links were provided.
+    /// </summary>
+    public IReadOnlyList<OffMeshLinkDef>? OffMeshLinks { get; }
+
     public NavMeshData(DtNavMesh navMesh, DtNavMeshQuery query,
         bool isMultiTile = false, float tileSize = 0f,
         float[]? sourceVertices = null, int[]? sourceIndices = null,
         NavMeshConfiguration? navConfig = null,
-        float tileOriginX = 0f, float tileOriginZ = 0f)
+        float tileOriginX = 0f, float tileOriginZ = 0f,
+        float worldBminY = -1000f, float worldBmaxY = 1000f,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         NavMesh = navMesh;
         Query = query;
@@ -84,6 +100,9 @@ public class NavMeshData
         NavConfig = navConfig;
         TileOriginX = tileOriginX;
         TileOriginZ = tileOriginZ;
+        WorldBminY = worldBminY;
+        WorldBmaxY = worldBmaxY;
+        OffMeshLinks = offMeshLinks;
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using Spatial.Physics;
+using Spatial.Pathfinding;
 using System.Numerics;
 using System.Collections.Generic;
 
@@ -340,6 +341,10 @@ public class CharacterController : ICharacterController
         _groundContacts.Remove(entityId);
         _recoveryTimers.Remove(entityId);
     }
+
+    // Off-mesh link traversal is not supported on the legacy velocity-based controller.
+    public void BeginLinkTraversal(PhysicsEntity entity, Vector3 entry, Vector3 exit, OffMeshLinkType type) { }
+    public (OffMeshLinkType Type, float T)? GetTraversalInfo(int entityId) => null;
 }
 
 /// <summary>

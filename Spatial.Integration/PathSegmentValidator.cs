@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Spatial.Pathfinding;
 
 namespace Spatial.Integration;
 
@@ -66,29 +67,34 @@ public class PathSegmentValidator
     /// <param name="agentRadius">Agent radius for collision checks (units)</param>
     /// <returns>Validation result with details</returns>
     public ValidationResult ValidatePath(
-        IReadOnlyList<Vector3> waypoints, 
-        float maxClimb, 
+        IReadOnlyList<Vector3> waypoints,
+        float maxClimb,
         float maxSlope,
-        float agentRadius = 0.5f)
+        float agentRadius = 0.5f,
+        IReadOnlyList<OffMeshLinkType?>? offMeshLinkTypes = null)
     {
-        var result = new ValidationResult 
-        { 
+        var result = new ValidationResult
+        {
             IsValid = true,
             Statistics = new PathStatistics()
         };
-        
+
         if (waypoints == null || waypoints.Count < 2)
         {
             result.IsValid = false;
             result.RejectionReason = "Path has fewer than 2 waypoints";
             return result;
         }
-        
+
         // Analyze each segment
         result.Statistics.SegmentCount = waypoints.Count - 1;
-        
+
         for (int i = 0; i < waypoints.Count - 1; i++)
         {
+            // Off-mesh link segments are traversed kinematically — skip climb/slope checks.
+            if (offMeshLinkTypes != null && i < offMeshLinkTypes.Count && offMeshLinkTypes[i] != null)
+                continue;
+
             var current = waypoints[i];
             var next = waypoints[i + 1];
             

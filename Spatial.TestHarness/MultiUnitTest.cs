@@ -310,11 +310,12 @@ public static class MultiUnitTest
     {
         // Ground plane
         var groundShape = physicsWorld.CreateBoxShape(new Vector3(25, 0.1f, 25));
-        physicsWorld.RegisterEntity(
+        physicsWorld.RegisterEntityWithInertia(
             entityId: 5000,
             entityType: EntityType.StaticObject,
             position: new Vector3(0, -0.05f, 0),
             shape: groundShape,
+            inertia: default,
             isStatic: true
         );
         
@@ -330,11 +331,12 @@ public static class MultiUnitTest
         
         for (int i = 0; i < obstaclePositions.Length; i++)
         {
-            physicsWorld.RegisterEntity(
+            physicsWorld.RegisterEntityWithInertia(
                 entityId: 5001 + i,
                 entityType: EntityType.StaticObject,
                 position: obstaclePositions[i],
                 shape: obstacleShape,
+                inertia: default,
                 isStatic: true
             );
         }

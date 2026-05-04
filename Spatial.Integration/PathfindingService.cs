@@ -1,4 +1,5 @@
 using Spatial.Pathfinding;
+using DotRecast.Recast;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -94,12 +95,14 @@ public class PathfindingService
             return pathResult;
         }
         
-        // Validate path against physical constraints (use AgentConfig as source of truth)
+        // Validate path against physical constraints (use AgentConfig as source of truth).
+        // Off-mesh link segments are skipped — they are traversed kinematically.
         var validation = _pathValidator.ValidatePath(
             pathResult.Waypoints,
-            _agentConfig.MaxClimb,    // ← Use AgentConfig
-            _agentConfig.MaxSlope,    // ← Use AgentConfig
-            _agentConfig.Radius       // ← Use AgentConfig
+            _agentConfig.MaxClimb,
+            _agentConfig.MaxSlope,
+            _agentConfig.Radius,
+            pathResult.OffMeshLinkTypes
         );
         
         if (validation.IsValid)
@@ -340,9 +343,16 @@ public class PathfindingService
     ///   NavMesh tile configuration — must match the configuration used during generation.
     /// </param>
     /// <returns>Number of tiles rebuilt (0 if NavMesh was not built with tile support).</returns>
+    /// <param name="obstacleAabb">
+    ///   Optional world-space AABB of a solid obstacle to mark as unwalkable inside the tile.
+    ///   Pass null to rebuild purely from <paramref name="newVertices"/>/<paramref name="newIndices"/>.
+    ///   When provided and vertices/indices are non-empty, only the obstacle footprint loses
+    ///   walkability — the rest of the tile is rebuilt from source geometry.
+    /// </param>
     public int RebuildNavMeshRegion(Vector3 center, float radius,
         float[] newVertices, int[] newIndices,
-        NavMeshConfiguration navConfig)
+        NavMeshConfiguration navConfig,
+        (Vector3 Min, Vector3 Max)? obstacleAabb = null)
     {
         var navMeshData = _pathfinder.NavMeshData;
         if (!navMeshData.IsMultiTile)
@@ -358,6 +368,30 @@ public class PathfindingService
         float origX = navMeshData.TileOriginX;
         float origZ = navMeshData.TileOriginZ;
 
+        // Build a convex volume (box hull in XZ) from the obstacle AABB so Recast marks
+        // only the obstacle footprint as unwalkable, not the entire tile.
+        RcConvexVolume? vol = null;
+        if (obstacleAabb.HasValue && newVertices.Length > 0)
+        {
+            var (oMin, oMax) = obstacleAabb.Value;
+            // RcAreas.MarkConvexPolyArea infers nverts = verts.Length / 3 (3D XYZ triplets).
+            // The Y component in each vertex is ignored — hmin/hmax define the height range.
+            float midY = (oMin.Y + oMax.Y) * 0.5f;
+            vol = new RcConvexVolume
+            {
+                verts = new float[]
+                {
+                    oMin.X, midY, oMin.Z,
+                    oMax.X, midY, oMin.Z,
+                    oMax.X, midY, oMax.Z,
+                    oMin.X, midY, oMax.Z,
+                },
+                hmin    = oMin.Y,
+                hmax    = oMax.Y,
+                areaMod = new RcAreaModification(0) // null area = unwalkable
+            };
+        }
+
         // Determine tile range that overlaps the AABB of the sphere (origin-relative)
         int txMin = (int)Math.Floor((center.X - radius - origX) / tileSize);
         int txMax = (int)Math.Floor((center.X + radius - origX) / tileSize);
@@ -369,7 +403,7 @@ public class PathfindingService
         {
             for (int tx = txMin; tx <= txMax; tx++)
             {
-                bool ok = _pathfinder.RebuildTile(tx, tz, newVertices, newIndices, _agentConfig, navConfig);
+                bool ok = _pathfinder.RebuildTile(tx, tz, newVertices, newIndices, _agentConfig, navConfig, vol);
                 if (ok) rebuilt++;
             }
         }

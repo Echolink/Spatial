@@ -1,5 +1,6 @@
 using Spatial.Physics;
 using Spatial.Pathfinding;
+using Spatial.MeshLoading.Data;
 using System;
 using System.Numerics;
 using System.Collections.Generic;
@@ -59,7 +60,8 @@ public class NavMeshBuilder
     /// - Runtime obstacle modification
     /// - Integration with physics simulation
     /// </summary>
-    public NavMeshData BuildNavMeshDirect(AgentConfig agentConfig)
+    public NavMeshData BuildNavMeshDirect(AgentConfig agentConfig,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         // Extract raw mesh geometry without physics processing
         var (vertices, indices) = ExtractRawMeshGeometry();
@@ -74,8 +76,8 @@ public class NavMeshBuilder
             sourceMaxY = Math.Max(sourceMaxY, v.Y);
         }
         
-        // Generate NavMesh using direct approach
-        var navMeshData = _navMeshGenerator.GenerateNavMeshDirect(vertices, indices, agentConfig);
+        // Generate NavMesh using direct approach (forward off-mesh links if provided)
+        var navMeshData = _navMeshGenerator.GenerateNavMeshDirect(vertices, indices, agentConfig, offMeshLinks);
         
         // Validate navmesh height range against source mesh
         if (vertices.Count > 0)
@@ -133,7 +135,8 @@ public class NavMeshBuilder
     /// </summary>
     /// <param name="agentConfig">Agent constraints (single source of truth).</param>
     /// <param name="navConfig">Tile configuration.</param>
-    public NavMeshData BuildTiledNavMeshDirect(AgentConfig agentConfig, NavMeshConfiguration navConfig)
+    public NavMeshData BuildTiledNavMeshDirect(AgentConfig agentConfig, NavMeshConfiguration navConfig,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         var (vertices, indices) = ExtractRawMeshGeometry();
 
@@ -147,7 +150,7 @@ public class NavMeshBuilder
 
         var indicesArray = indices.ToArray();
 
-        return _navMeshGenerator.GenerateTiledNavMesh(verticesArray, indicesArray, agentConfig, navConfig);
+        return _navMeshGenerator.GenerateTiledNavMesh(verticesArray, indicesArray, agentConfig, navConfig, offMeshLinks);
     }
 
 

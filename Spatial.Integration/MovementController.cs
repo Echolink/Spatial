@@ -4,6 +4,7 @@ using Spatial.Integration.Events;
 using System.Numerics;
 using System.Linq;
 using System.Collections.Generic;
+using System;
 
 namespace Spatial.Integration;
 
@@ -158,29 +159,31 @@ public class MovementController
     /// <param name="config">Optional pathfinding behavior configuration</param>
     /// <param name="characterConfig">Optional character controller configuration</param>
     public MovementController(
-        PhysicsWorld physicsWorld, 
-        Pathfinder pathfinder, 
+        PhysicsWorld physicsWorld,
+        Pathfinder pathfinder,
         AgentConfig agentConfig,
-        PathfindingConfiguration? config = null, 
+        PathfindingConfiguration? config = null,
         CharacterControllerConfig? characterConfig = null)
-        : this(physicsWorld, new PathfindingService(pathfinder, agentConfig, config ?? new PathfindingConfiguration()), 
-               agentConfig, config, new CharacterController(physicsWorld, characterConfig))
+        : this(physicsWorld, new PathfindingService(pathfinder, agentConfig, config ?? new PathfindingConfiguration()),
+               agentConfig, config, new MotorCharacterController(physicsWorld))
     {
     }
-    
+
     /// <summary>
     /// Creates a new movement controller with explicit PathfindingService and velocity-based character controller.
     /// </summary>
+#pragma warning disable CS0618 // CharacterController kept for motor-vs-velocity comparison test
     public MovementController(
         PhysicsWorld physicsWorld,
         PathfindingService pathfindingService,
         AgentConfig agentConfig,
         PathfindingConfiguration? config = null,
         CharacterController? characterController = null)
-        : this(physicsWorld, pathfindingService, agentConfig, config, 
+        : this(physicsWorld, pathfindingService, agentConfig, config,
                (ICharacterController)(characterController ?? new CharacterController(physicsWorld)))
     {
     }
+#pragma warning restore CS0618
     
     /// <summary>
     /// Creates a new movement controller with motor-based character controller.
@@ -303,22 +306,53 @@ public class MovementController
             
             Console.WriteLine($"[MovementController] Nearest navmesh: ({nearestNavmesh.Value.X:F2}, {nearestNavmesh.Value.Y:F2}, {nearestNavmesh.Value.Z:F2})");
             Console.WriteLine($"[MovementController]   Horizontal distance: {horizontalDist:F2}m, Vertical distance: {verticalDist:F2}m, Total: {totalDist:F2}m");
-            
-            // CRITICAL FIX: If agent is far from navmesh, snap to nearest valid position
-            // This handles cases where agents spawn in non-walkable areas or off-mesh
-            if (horizontalDist > 2.0f)
+
+            // Teleport to nearest valid navmesh position whenever the agent is not standing
+            // on valid navmesh. This covers two cases:
+            //   1. Agent spawned far off-mesh (horizontalDist >> agentRadius)
+            //   2. Agent is inside an obstacle's eroded zone after a runtime navmesh rebuild —
+            //      the erosion buffer is ~agentRadius wide, so horizontalDist ≈ 0.3-0.4m.
+            //      Without this, the agent stays physically pressed against the obstacle while
+            //      the new path routes it into the obstacle, causing persistent sliding.
+            // Threshold 0.15m: safely above navmesh polygon edge jitter (< 0.05m) but well
+            // below one agent radius (0.4m), so only truly off-navmesh agents are affected.
+            if (horizontalDist > 0.15f)
             {
-                Console.WriteLine($"[MovementController] Agent spawned off navmesh, teleporting to nearest valid position");
-                var teleportPos = new Vector3(nearestNavmesh.Value.X, nearestNavmesh.Value.Y + agentHalfHeight, nearestNavmesh.Value.Z);
+                // Base: snap to the erosion boundary.
+                // Extra: push one agentRadius further in the same outward direction so the
+                // capsule has agentRadius of clearance from the obstacle face, preventing
+                // the zero-gap contact that causes visible friction ("scratching") along
+                // the path segment that runs beside the obstacle wall.
+                float extraClearance = request.AgentRadius;
+                Vector3 clearPos;
+                if (horizontalDist > 0.01f)
+                {
+                    var outwardX = (nearestNavmesh.Value.X - groundContactPoint.X) / horizontalDist;
+                    var outwardZ = (nearestNavmesh.Value.Z - groundContactPoint.Z) / horizontalDist;
+                    var pushed = new Vector3(
+                        nearestNavmesh.Value.X + outwardX * extraClearance,
+                        nearestNavmesh.Value.Y,
+                        nearestNavmesh.Value.Z + outwardZ * extraClearance);
+                    // Snap the pushed position back to valid navmesh (it may overshoot into
+                    // empty space on very thin terrain patches).
+                    var pushedSnapped = svc.FindNearestValidPosition(pushed, new Vector3(extraClearance + 0.3f, 2f, extraClearance + 0.3f));
+                    clearPos = pushedSnapped ?? nearestNavmesh.Value;
+                }
+                else
+                {
+                    clearPos = nearestNavmesh.Value;
+                }
+
+                var teleportPos = new Vector3(clearPos.X, clearPos.Y + agentHalfHeight, clearPos.Z);
                 _physicsWorld.SetEntityPosition(entity, teleportPos);
                 snappedStart = teleportPos;
-                Console.WriteLine($"[MovementController]   Teleported to: ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
+                Console.WriteLine($"[MovementController] Agent off navmesh (dist={horizontalDist:F2}m), teleporting to ({snappedStart.X:F2}, {snappedStart.Y:F2}, {snappedStart.Z:F2})");
             }
             else
             {
-                // Agent is close to navmesh horizontally, just align Y coordinate
+                // Agent is on valid navmesh — just align Y to the surface
                 snappedStart = new Vector3(currentPosition.X, nearestNavmesh.Value.Y + agentHalfHeight, currentPosition.Z);
-                Console.WriteLine($"[MovementController] Agent near valid navmesh, aligning Y coordinate");
+                Console.WriteLine($"[MovementController] Agent on valid navmesh, aligning Y coordinate");
             }
         }
         else
@@ -416,7 +450,8 @@ public class MovementController
             AgentHeight = request.AgentHeight,
             AgentRadius = request.AgentRadius,
             Waypoints = pathResult.Waypoints.ToList(),
-            CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, snappedStart, 0),
+            OffMeshLinkTypes = pathResult.OffMeshLinkTypes.ToList(),
+            CurrentWaypointIndex = FindNextValidWaypoint(pathResult.Waypoints, snappedStart, 0, pathResult.OffMeshLinkTypes),
             LastValidationTime = 0f,
             LastReplanTime = DateTime.MinValue,
             StartTime = DateTime.UtcNow,
@@ -501,8 +536,9 @@ public class MovementController
         {
             _characterController.UpdateGroundedState(agent, deltaTime);
             
-            // Apply idle grounding to agents without active movement states
-            if (!_movementStates.ContainsKey(agent.EntityId))
+            // Apply idle grounding to agents without active movement, or completed ones
+            if (!_movementStates.ContainsKey(agent.EntityId) ||
+                (_movementStates.TryGetValue(agent.EntityId, out var ms) && ms.IsCompleted))
             {
                 _characterController.ApplyIdleGrounding(agent);
             }
@@ -546,14 +582,15 @@ public class MovementController
         {
             Console.WriteLine($"[MovementController] Entity {entity.EntityId} landed, recovering...");
         }
-        
-        // If movement is completed, stop all movement
-        if (state.IsCompleted)
-        {
-            // Keep velocity at zero
-            _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+
+        // Motor drives position during link traversal — skip all pathfinding logic
+        if (currentState == CharacterState.LINK_TRAVERSAL)
             return;
-        }
+        
+        // If movement is completed, let physics settle and sleep naturally.
+        // Idle grounding handles drift; forcing velocity here would wake the body every tick.
+        if (state.IsCompleted)
+            return;
         
         // Check if we've completed the path
         if (state.CurrentWaypointIndex >= state.Waypoints.Count)
@@ -635,7 +672,7 @@ public class MovementController
 
                     float snapSurfaceY;
                     bool snapFound;
-                    if (_physicsWorld.Raycast(dStart, dEnd, out var dHit, out _))
+                    if (_physicsWorld.Raycast(dStart, dEnd, out var dHit, out _) && dHit.Y < currentPosition.Y)
                     {
                         snapSurfaceY = dHit.Y;
                         snapFound = true;
@@ -763,14 +800,55 @@ public class MovementController
         
         if (xzDistanceToWaypoint < threshold)
         {
-            // Find next valid waypoint
-            int nextWaypointIndex = FindNextValidWaypoint(state.Waypoints, currentPosition, state.CurrentWaypointIndex + 1);
+            int rawNextIndex = state.CurrentWaypointIndex + 1;
+
+            // Case A: current waypoint IS the link entry (path starts at entry, e.g. [ENTRY, EXIT])
+            OffMeshLinkType? curLinkType = state.OffMeshLinkTypes.Count > state.CurrentWaypointIndex
+                ? state.OffMeshLinkTypes[state.CurrentWaypointIndex] : null;
+
+            if (curLinkType.HasValue && rawNextIndex < state.Waypoints.Count)
+            {
+                var linkEntry = state.Waypoints[state.CurrentWaypointIndex];
+                var linkExit  = state.Waypoints[rawNextIndex];
+                // Waypoints are navmesh ground-level Y; BeginLinkTraversal drives entity CENTER position.
+                _characterController.BeginLinkTraversal(entity,
+                    new Vector3(linkEntry.X, linkEntry.Y + agentHalfHeight, linkEntry.Z),
+                    new Vector3(linkExit.X,  linkExit.Y  + agentHalfHeight, linkExit.Z),
+                    curLinkType.Value);
+                // Advance past the exit waypoint — DotRecast flags the exit with the same
+                // DT_STRAIGHTPATH_OFFMESH_CONNECTION flag, so leaving CurrentWaypointIndex
+                // on it would re-trigger Case A when the entity arrives at exit, causing an
+                // unintended second traversal to the next normal waypoint.
+                state.CurrentWaypointIndex = rawNextIndex + 1;
+                return;
+            }
+
+            // Case B: next waypoint is the link entry (normal walk-up-to-link case)
+            OffMeshLinkType? linkType = (state.OffMeshLinkTypes.Count > rawNextIndex)
+                ? state.OffMeshLinkTypes[rawNextIndex]
+                : null;
+
+            if (linkType.HasValue && rawNextIndex + 1 < state.Waypoints.Count)
+            {
+                var linkEntry = state.Waypoints[rawNextIndex];
+                var linkExit  = state.Waypoints[rawNextIndex + 1];
+                // Waypoints are navmesh ground-level Y; BeginLinkTraversal drives entity CENTER position.
+                _characterController.BeginLinkTraversal(entity,
+                    new Vector3(linkEntry.X, linkEntry.Y + agentHalfHeight, linkEntry.Z),
+                    new Vector3(linkExit.X,  linkExit.Y  + agentHalfHeight, linkExit.Z),
+                    linkType.Value);
+                // Advance past the exit waypoint (same reason as Case A above).
+                state.CurrentWaypointIndex = rawNextIndex + 2;
+                return;
+            }
+
+            // Normal waypoint advance
+            int nextWaypointIndex = FindNextValidWaypoint(state.Waypoints, currentPosition, rawNextIndex, state.OffMeshLinkTypes);
             state.CurrentWaypointIndex = nextWaypointIndex;
-            
-            // Report progress
+
             var progress = state.CurrentWaypointIndex / (float)state.Waypoints.Count;
             OnMovementProgress?.Invoke(entity.EntityId, progress);
-            
+
             if (nextWaypointIndex < state.Waypoints.Count)
             {
                 MoveTowardWaypoint(entity, state.Waypoints[nextWaypointIndex], currentPosition, state.MaxSpeed);
@@ -834,7 +912,10 @@ public class MovementController
                 // negative dropDistance (destination is above agent) → never triggers.
                 // We must NOT bypass it for high-destination paths — that caused agents
                 // to walk off island edges into void when the target was at Y=7.93.
-                if (WouldFallOffEdge(svc, entity, currentPosition, desiredVelocity, state.AgentRadius))
+                // Exception: skip the check when an off-mesh link is upcoming — the link
+                // entry may be at a ledge edge, and blocking it prevents traversal.
+                if (!HasUpcomingOffMeshLink(state) &&
+                    WouldFallOffEdge(svc, entity, currentPosition, desiredVelocity, state.AgentRadius))
                 {
                     Console.WriteLine($"[MovementController] Agent {entity.EntityId} at unexpected edge - stopping");
                     _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
@@ -1041,7 +1122,7 @@ public class MovementController
                 // and miss the surface travelling downward.
                 var rayStart = new Vector3(currentPosition.X, currentPosition.Y + agentHalfHeight + 0.1f, currentPosition.Z);
                 var rayEnd   = new Vector3(currentPosition.X, currentPosition.Y - (fallRecoveryThreshold + agentHalfHeight + 0.5f), currentPosition.Z);
-                if (_physicsWorld.Raycast(rayStart, rayEnd, out var rayHit, out _))
+                if (_physicsWorld.Raycast(rayStart, rayEnd, out var rayHit, out _) && rayHit.Y < currentPosition.Y)
                 {
                     groundSurfaceY = rayHit.Y;
                     foundSurface = true;
@@ -1170,6 +1251,11 @@ public class MovementController
 
             for (int i = state.CurrentWaypointIndex; i < lookaheadEnd; i++)
             {
+                // Off-mesh link waypoints are portal vertices, not navmesh surface points —
+                // IsValidPosition would fail for them even when the link is valid.
+                if (i < state.OffMeshLinkTypes.Count && state.OffMeshLinkTypes[i].HasValue)
+                    continue;
+
                 if (!ServiceFor(entity.EntityId).Pathfinder.IsValidPosition(state.Waypoints[i], snapExtents))
                 {
                     Console.WriteLine($"[MovementController] Waypoint {i} for entity {entity.EntityId} is no longer on NavMesh, replanning");
@@ -1204,9 +1290,10 @@ public class MovementController
         if (pathResult.Success)
         {
             state.Waypoints = pathResult.Waypoints.ToList();
-            state.CurrentWaypointIndex = FindNextValidWaypoint(state.Waypoints, currentPosition, 0);
+            state.OffMeshLinkTypes = pathResult.OffMeshLinkTypes.ToList();
+            state.CurrentWaypointIndex = FindNextValidWaypoint(state.Waypoints, currentPosition, 0, state.OffMeshLinkTypes);
             state.LastReplanTime = DateTime.UtcNow;
-            
+
             Console.WriteLine($"[MovementController] Replan successful: {state.Waypoints.Count} waypoints");
             OnPathReplanned?.Invoke(entity.EntityId);
         }
@@ -1253,6 +1340,17 @@ public class MovementController
         return floorDifference <= tolerance;
     }
     
+    private static bool HasUpcomingOffMeshLink(MovementState state)
+    {
+        int end = Math.Min(state.CurrentWaypointIndex + 3, state.OffMeshLinkTypes.Count);
+        for (int i = state.CurrentWaypointIndex; i < end; i++)
+        {
+            if (state.OffMeshLinkTypes[i].HasValue)
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>
     /// Checks if moving in a direction would cause agent to fall off an edge.
     /// Uses navmesh query to check if ground exists ahead.
@@ -1419,18 +1517,21 @@ public class MovementController
     
     /// <summary>
     /// Finds the next waypoint that has a different XZ position from the current position.
+    /// Link entry waypoints are never skipped — the agent must reach them to trigger traversal.
     /// </summary>
-    private int FindNextValidWaypoint(IReadOnlyList<Vector3> waypoints, Vector3 currentPosition, int startIndex)
+    private int FindNextValidWaypoint(IReadOnlyList<Vector3> waypoints, Vector3 currentPosition, int startIndex,
+        IReadOnlyList<OffMeshLinkType?>? linkTypes = null)
     {
         for (int i = startIndex; i < waypoints.Count; i++)
         {
-            var waypoint = waypoints[i];
-            var xzDistance = CalculateXZDistance(currentPosition, waypoint);
-            
+            if (linkTypes != null && linkTypes.Count > i && linkTypes[i].HasValue)
+                return i;
+
+            var xzDistance = CalculateXZDistance(currentPosition, waypoints[i]);
             if (xzDistance > 0.1f)
                 return i;
         }
-        
+
         return waypoints.Count;
     }
     
@@ -1482,4 +1583,7 @@ public class MovementController
         // Accumulates time spent in a wrong-floor condition before triggering a replan.
         // Prevents the per-frame replan storm when an agent is falling.
         public float WrongFloorAccumulator { get; set; } = 0f;
+
+        // Per-waypoint off-mesh link type annotations from the pathfinder. Parallel to Waypoints.
+        public List<OffMeshLinkType?> OffMeshLinkTypes { get; set; } = new();
     }
