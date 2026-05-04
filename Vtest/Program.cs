@@ -12,7 +12,7 @@ service.Tick();
 service.Move(10018, new Vector3(8,0,5));
 
 
-for(int i = 1;i<200;i++)
+for(int i = 1;i<500;i++)
 {
     Console.WriteLine($"Tick {i} : {service.GetPosition(10018)}");
     service.Tick();

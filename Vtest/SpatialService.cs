@@ -1,5 +1,6 @@
 using System.Numerics;
 using Spatial.Integration;
+using Spatial.MeshLoading;
 using Spatial.Pathfinding;
 using Spatial.Physics;
 
@@ -37,6 +38,12 @@ public class SpatialService
         }
         multiNavMesh.Bake();
         _world = new global::Spatial.Integration.World(multiNavMesh);
+
+        // Load the mesh geometry into the physics world so agents have ground to stand on.
+        // BakeNavMesh() uses a temporary physics world (discarded after baking), so the
+        // live physics world starts empty — without this the agent falls forever.
+        var worldBuilder = new WorldBuilder(_world.Physics, new MeshLoader());
+        worldBuilder.LoadAndBuildWorld(meshPath);
 
     }
 
