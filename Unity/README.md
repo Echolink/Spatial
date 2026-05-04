@@ -33,7 +33,7 @@ Real-time 3D visualization of BepuPhysics simulation and DotRecast pathfinding u
 
 ### Performance
 - Efficient object pooling
-- 60 FPS updates via WebSocket
+- 125 Hz simulation updates via WebSocket
 - Handles hundreds of entities smoothly
 
 ## 🚀 Quick Start

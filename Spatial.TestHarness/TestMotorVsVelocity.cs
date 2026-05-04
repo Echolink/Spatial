@@ -205,7 +205,9 @@ public static class TestMotorVsVelocity
             Console.WriteLine("══════════════════════════════════════════════════════════════");
             Console.WriteLine();
 
+#pragma warning disable CS0618 // CharacterController intentionally used for motor-vs-velocity comparison
             CharacterController? velocityController = null;
+#pragma warning restore CS0618
             MotorCharacterController? motorController = null;
 
             if (useMotor)
@@ -231,7 +233,9 @@ public static class TestMotorVsVelocity
                     GroundedVelocityThreshold = 0.5f,
                     StabilityThreshold = 0.2f
                 };
+#pragma warning disable CS0618
                 velocityController = new CharacterController(physicsWorld, velocityConfig);
+#pragma warning restore CS0618
                 Console.WriteLine("✓ Velocity-based character controller initialized");
             }
 
@@ -247,9 +251,11 @@ public static class TestMotorVsVelocity
             var pathfindingService = new PathfindingService(pathfinder, agentConfig, pathfindingConfig);
 
             // Create movement controller with appropriate character controller
+#pragma warning disable CS0618 // CharacterController overload intentionally used for motor-vs-velocity comparison
             movementController = useMotor
                 ? new MovementController(physicsWorld, pathfindingService, agentConfig, pathfindingConfig, motorController)
                 : new MovementController(physicsWorld, pathfindingService, agentConfig, pathfindingConfig, velocityController);
+#pragma warning restore CS0618
 
             Console.WriteLine("✓ Movement controller initialized");
             Console.WriteLine($"  - Path Auto-Fix: {pathfindingConfig.EnablePathAutoFix}");

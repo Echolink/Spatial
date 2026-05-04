@@ -1,6 +1,8 @@
 using System.Numerics;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Spatial.MeshLoading.Data;
+using Spatial.Pathfinding;
 
 namespace Spatial.MeshLoading.Loaders;
 
@@ -10,6 +12,11 @@ namespace Spatial.MeshLoading.Loaders;
 /// </summary>
 public class ObjMeshLoader : IMeshFormatLoader
 {
+    // Matches: offmesh_jump_01_start, offmesh_teleport_02_end, offmesh_climb_03_start
+    private static readonly Regex OffMeshPattern =
+        new(@"^offmesh_(jump|teleport|climb)_(\w+)_(start|end)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public IReadOnlyList<string> SupportedExtensions => new[] { ".obj" };
     
     public bool CanLoad(string filePath)
@@ -53,120 +60,136 @@ public class ObjMeshLoader : IMeshFormatLoader
     
     private void ParseObjFile(string[] lines, WorldData worldData)
     {
-        // Temporary storage for global vertex/normal/uv data
         var globalVertices = new List<Vector3>();
         var globalNormals = new List<Vector3>();
         var globalUVs = new List<Vector2>();
-        
-        // Current mesh being built
+
         MeshData? currentMesh = null;
         string currentMeshName = "default";
-        
-        // Temporary indices for current mesh
+
         var meshVertexIndices = new List<int>();
         var meshVertices = new List<Vector3>();
-        
+
+        // Keyed by (type, id, role) → centroid position; paired after parsing
+        var halfDefs = new Dictionary<(OffMeshLinkType type, string id, string role), Vector3>();
+
         for (int i = 0; i < lines.Length; i++)
         {
             var line = lines[i].Trim();
-            
-            // Skip empty lines and comments
+
             if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
                 continue;
-            
+
             var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0)
                 continue;
-            
+
             var command = parts[0].ToLowerInvariant();
-            
+
             switch (command)
             {
-                case "o":  // Object name
-                case "g":  // Group name
-                    // Start a new mesh
+                case "o":
+                case "g":
                     if (currentMesh != null && meshVertices.Count > 0)
                     {
                         FinalizeMesh(currentMesh, meshVertices, meshVertexIndices);
-                        worldData.Meshes.Add(currentMesh);
+                        FinalizeGroup(currentMesh, meshVertices, halfDefs, worldData);
                     }
-                    
+
                     currentMeshName = parts.Length > 1 ? string.Join("_", parts.Skip(1)) : "unnamed";
                     currentMesh = new MeshData { Name = currentMeshName };
                     meshVertices.Clear();
                     meshVertexIndices.Clear();
                     break;
-                
-                case "v":  // Vertex position
+
+                case "v":
                     if (parts.Length >= 4)
-                    {
-                        var x = ParseFloat(parts[1]);
-                        var y = ParseFloat(parts[2]);
-                        var z = ParseFloat(parts[3]);
-                        globalVertices.Add(new Vector3(x, y, z));
-                    }
+                        globalVertices.Add(new Vector3(ParseFloat(parts[1]), ParseFloat(parts[2]), ParseFloat(parts[3])));
                     break;
-                
-                case "vn":  // Vertex normal
+
+                case "vn":
                     if (parts.Length >= 4)
-                    {
-                        var x = ParseFloat(parts[1]);
-                        var y = ParseFloat(parts[2]);
-                        var z = ParseFloat(parts[3]);
-                        globalNormals.Add(new Vector3(x, y, z));
-                    }
+                        globalNormals.Add(new Vector3(ParseFloat(parts[1]), ParseFloat(parts[2]), ParseFloat(parts[3])));
                     break;
-                
-                case "vt":  // Texture coordinate
+
+                case "vt":
                     if (parts.Length >= 3)
-                    {
-                        var u = ParseFloat(parts[1]);
-                        var v = ParseFloat(parts[2]);
-                        globalUVs.Add(new Vector2(u, v));
-                    }
+                        globalUVs.Add(new Vector2(ParseFloat(parts[1]), ParseFloat(parts[2])));
                     break;
-                
-                case "f":  // Face
-                    // Ensure we have a current mesh
+
+                case "f":
                     if (currentMesh == null)
                     {
                         currentMeshName = "default";
                         currentMesh = new MeshData { Name = currentMeshName };
                     }
-                    
                     ParseFace(parts, globalVertices, globalNormals, globalUVs,
-                             meshVertices, meshVertexIndices);
+                              meshVertices, meshVertexIndices);
                     break;
-                
-                case "usemtl":  // Material (we ignore for now, but could use for grouping)
-                case "mtllib":  // Material library (ignore)
-                case "s":       // Smooth shading (ignore)
-                    // Ignore these for physics purposes
+
+                case "usemtl":
+                case "mtllib":
+                case "s":
                     break;
             }
         }
-        
-        // Finalize last mesh
+
+        // Finalize last group
         if (currentMesh != null && meshVertices.Count > 0)
         {
             FinalizeMesh(currentMesh, meshVertices, meshVertexIndices);
-            worldData.Meshes.Add(currentMesh);
+            FinalizeGroup(currentMesh, meshVertices, halfDefs, worldData);
         }
-        
-        // If no objects/groups were defined, create a single default mesh
+
         if (worldData.Meshes.Count == 0 && globalVertices.Count > 0)
         {
             Console.WriteLine($"[ObjMeshLoader] No objects/groups found, creating single default mesh");
             currentMesh = new MeshData { Name = "default" };
-            
-            // All vertices go into this mesh, we need to reprocess faces
-            // For simplicity, if no grouping was used, we'll need to reparse
-            // Let's just use all global vertices directly
             currentMesh.Vertices.AddRange(globalVertices);
-            
-            // We need to create indices - this is tricky without reparsing faces
-            // For now, assume faces were already processed into meshVertices/indices
             worldData.Meshes.Add(currentMesh);
+        }
+
+        // Pair start+end half-defs into complete OffMeshLinkDef objects
+        var starts = halfDefs.Where(kv => kv.Key.role == "start").ToList();
+        foreach (var s in starts)
+        {
+            var endKey = (s.Key.type, s.Key.id, "end");
+            if (halfDefs.TryGetValue(endKey, out var endPos))
+            {
+                worldData.OffMeshLinks.Add(new OffMeshLinkDef(s.Key.id, s.Key.type, s.Value, endPos));
+                Console.WriteLine($"[ObjMeshLoader] Off-mesh link: {s.Key.type} '{s.Key.id}'  {s.Value} → {endPos}");
+            }
+            else
+            {
+                Console.WriteLine($"[ObjMeshLoader] WARNING: offmesh_{s.Key.type}_{s.Key.id}_start has no matching _end");
+            }
+        }
+    }
+
+    private void FinalizeGroup(MeshData mesh, List<Vector3> vertices,
+        Dictionary<(OffMeshLinkType type, string id, string role), Vector3> halfDefs,
+        WorldData worldData)
+    {
+        var match = OffMeshPattern.Match(mesh.Name);
+        if (match.Success)
+        {
+            var type = Enum.Parse<OffMeshLinkType>(match.Groups[1].Value, ignoreCase: true);
+            var id   = match.Groups[2].Value;
+            var role = match.Groups[3].Value.ToLowerInvariant();
+            // Use average XZ but minimum Y (bottom of sphere = terrain contact point).
+            // The sphere marker's centroid Y sits at sphere center, which is above the
+            // navmesh surface by roughly the sphere radius. Using minY ensures the link
+            // endpoint snaps to the nearest polygon during NavMesh build.
+            float cx = vertices.Sum(v => v.X) / vertices.Count;
+            float cy = vertices.Min(v => v.Y);
+            float cz = vertices.Sum(v => v.Z) / vertices.Count;
+            var centroid = new Vector3(cx, cy, cz);
+            halfDefs[(type, id, role)] = centroid;
+            // Marker geometry is intentionally NOT added to worldData.Meshes
+        }
+        else
+        {
+            worldData.Meshes.Add(mesh);
         }
     }
     

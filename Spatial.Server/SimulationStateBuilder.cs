@@ -13,21 +13,37 @@ public static class SimulationStateBuilder
     /// <summary>
     /// Build a complete simulation state from the current physics world
     /// </summary>
+    /// <param name="getTraversalInfo">
+    /// Optional delegate: given an entityId, returns (typeName, normalizedT) or null.
+    /// Use this to forward off-mesh link traversal state from the character controller.
+    /// </param>
     public static SimulationState BuildFromPhysicsWorld(
         PhysicsWorld physicsWorld,
         NavMeshData? navMeshData = null,
         PathResult? pathResult = null,
-        int? pathEntityId = null)
+        int? pathEntityId = null,
+        Func<int, (string type, float t)?>? getTraversalInfo = null)
     {
         var state = new SimulationState
         {
             Timestamp = (float)DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond
         };
-        
+
         // Add all entities
         foreach (var entity in physicsWorld.EntityRegistry.GetAllEntities())
         {
             var entityState = BuildEntityState(physicsWorld, entity);
+
+            if (getTraversalInfo != null)
+            {
+                var info = getTraversalInfo(entity.EntityId);
+                if (info.HasValue)
+                {
+                    entityState.TraversalType = info.Value.type;
+                    entityState.TraversalT    = info.Value.t;
+                }
+            }
+
             state.Entities.Add(entityState);
         }
         
@@ -136,55 +152,52 @@ public static class SimulationStateBuilder
     }
     
     /// <summary>
-    /// Build NavMesh geometry from NavMeshData
+    /// Build NavMesh geometry from NavMeshData — iterates every tile so tiled NavMeshes
+    /// are fully serialized and tile erasure/rebuild is visible in Unity.
     /// </summary>
     private static NavMeshGeometry BuildNavMeshGeometry(NavMeshData navMeshData)
     {
         var geometry = new NavMeshGeometry();
-        
+
         if (navMeshData.NavMesh == null)
             return geometry;
-        
-        // Extract vertices and triangles from DotRecast NavMesh
-        // This is a simplified version - you may need to iterate through all tiles
+
         var navMesh = navMeshData.NavMesh;
-        
-        // Get the first tile (tile 0)
-        var tile = navMesh.GetTile(0);
-        if (tile?.data != null)
+        int maxTiles = navMesh.GetMaxTiles();
+        int vertexOffset = 0;
+
+        for (int tileIdx = 0; tileIdx < maxTiles; tileIdx++)
         {
+            var tile = navMesh.GetTile(tileIdx);
+            if (tile?.data == null) continue;
+
             var data = tile.data;
-            
-            // Extract vertices
+
             for (int i = 0; i < data.header.vertCount; i++)
             {
-                int vertIndex = i * 3;
-                geometry.Vertices.Add(new[]
-                {
-                    data.verts[vertIndex],
-                    data.verts[vertIndex + 1],
-                    data.verts[vertIndex + 2]
-                });
+                int vi = i * 3;
+                geometry.Vertices.Add(new[] { data.verts[vi], data.verts[vi + 1], data.verts[vi + 2] });
             }
-            
-            // Extract triangles from polygons
+
             for (int i = 0; i < data.header.polyCount; i++)
             {
                 var poly = data.polys[i];
-                
-                // Each polygon can have multiple vertices - triangulate it
-                // Simple fan triangulation from first vertex
+                // Only render walkable ground polygons (flags bit 0 = walkable).
+                // Non-walkable polygons (obstacle footprint, area=0) are intentionally
+                // excluded so tile rebuilds produce a visible hole in the overlay.
+                if ((poly.flags & 0x01) == 0) continue;
                 for (int j = 2; j < poly.vertCount; j++)
                 {
-                    geometry.Indices.Add(poly.verts[0]);
-                    geometry.Indices.Add(poly.verts[j - 1]);
-                    geometry.Indices.Add(poly.verts[j]);
+                    geometry.Indices.Add(poly.verts[0]     + vertexOffset);
+                    geometry.Indices.Add(poly.verts[j - 1] + vertexOffset);
+                    geometry.Indices.Add(poly.verts[j]     + vertexOffset);
                 }
             }
-            
-            geometry.PolygonCount = data.header.polyCount;
+
+            geometry.PolygonCount += data.header.polyCount;
+            vertexOffset += data.header.vertCount;
         }
-        
+
         return geometry;
     }
 }

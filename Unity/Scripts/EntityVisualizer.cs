@@ -42,6 +42,8 @@ namespace Spatial.Unity
     private Dictionary<int, Vector3> previousTargetPositions = new Dictionary<int, Vector3>();
     private Dictionary<int, Color> agentColors = new Dictionary<int, Color>();
     private Dictionary<int, Transform> agentLabels = new Dictionary<int, Transform>();
+    // Tracks traversal type per entity so teleport transitions can snap position instantly.
+    private Dictionary<int, string> traversalTypes = new Dictionary<int, string>();
         
         void Start()
         {
@@ -234,7 +236,13 @@ namespace Spatial.Unity
             var renderer = visualObj.GetComponent<Renderer>();
             if (renderer != null)
             {
-                if (state.IsStatic && staticMaterial != null)
+                if (state.Type == "Obstacle")
+                {
+                    var mat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+                    mat.SetColor("_BaseColor", new Color(1f, 0.2f, 0.1f)); // bright red
+                    renderer.material = mat;
+                }
+                else if (state.IsStatic && staticMaterial != null)
                 {
                     renderer.material = staticMaterial;
                 }
@@ -468,7 +476,7 @@ namespace Spatial.Unity
         {
             if (!entityObjects.TryGetValue(state.Id, out var entityObj))
                 return;
-            
+
             // Update position
             if (state.Position.Length >= 3)
             {
@@ -478,41 +486,41 @@ namespace Spatial.Unity
                 // - Unity capsule pivot is at center by default
                 // - User wants "feet on ground" visual (Y=0 means feet at Y=0)
                 // - Solution: Offset visual position down by half the capsule height
-                
+
                 float yOffset = 0;
                 if (state.ShapeType == "Capsule" && state.Size.Length >= 2)
                 {
-                    // Size[1] is capsule height in physics world
-                    // Unity capsule scale is multiplied by 0.5f (see CreateShapeObject)
-                    // So actual Unity capsule height = state.Size[1] * 0.5f * 2 (Unity default height)
-                    // But Size[1] already contains the full physics height
                     float capsuleHeight = state.Size[1];
-                    yOffset = -capsuleHeight * 0.5f;  // Move down by half height so feet touch ground
+                    yOffset = -capsuleHeight * 0.5f;
                 }
-                
+
                 // Apply coordinate system transformation
                 // Unity uses left-handed coordinate system, server uses right-handed
                 // Negate X-axis to match Unity's OBJ importer behavior
                 Vector3 targetPos = new Vector3(
                     -state.Position[0],
-                    state.Position[1] + yOffset,  // Apply feet-pivot offset for capsules
+                    state.Position[1] + yOffset,
                     state.Position[2]
                 );
-                
+
+                // Teleport link: snap instantly so the agent doesn't visually glide
+                // 50m across the map. Jump links use normal smoothing since the server
+                // drives the arc position every tick.
+                string prevTraversal = traversalTypes.TryGetValue(state.Id, out var pt) ? pt : "none";
+                string curTraversal  = state.TraversalType ?? "none";
+                bool isTeleporting   = curTraversal == "Teleport";
+                bool justTeleported  = prevTraversal == "Teleport" && curTraversal != "Teleport";
+                traversalTypes[state.Id] = curTraversal;
+
                 // Store previous target for slope detection
                 if (targetPositions.TryGetValue(state.Id, out Vector3 oldTarget))
-                {
                     previousTargetPositions[state.Id] = oldTarget;
-                }
-                
-                // Store target position for interpolation
+
                 targetPositions[state.Id] = targetPos;
-                
-                // If smoothing disabled, apply position instantly
-                if (!enableSmoothing || state.IsStatic)
-                {
+
+                bool snapNow = !enableSmoothing || state.IsStatic || isTeleporting || justTeleported;
+                if (snapNow)
                     entityObj.transform.position = targetPos;
-                }
             }
             
             // Update rotation
@@ -564,13 +572,14 @@ namespace Spatial.Unity
                 Destroy(obj);
                 entityObjects.Remove(id);
             }
-            
+
             velocityLines.Remove(id);
             targetPositions.Remove(id);
             targetRotations.Remove(id);
             previousTargetPositions.Remove(id);
             agentColors.Remove(id);
             agentLabels.Remove(id);
+            traversalTypes.Remove(id);
         }
         
         /// <summary>
@@ -612,7 +621,6 @@ namespace Spatial.Unity
         
         void OnDestroy()
         {
-            // Clean up all entity objects
             foreach (var obj in entityObjects.Values)
             {
                 if (obj != null)
@@ -625,6 +633,7 @@ namespace Spatial.Unity
             previousTargetPositions.Clear();
             agentColors.Clear();
             agentLabels.Clear();
+            traversalTypes.Clear();
         }
     }
 }

@@ -127,11 +127,25 @@ public class NavMeshGenerator
     /// - Runtime obstacle modification
     /// - Geometry extracted from physics systems
     /// </summary>
-    public NavMeshData GenerateNavMeshDirect(float[] vertices, int[] indices, AgentConfig agentConfig)
+    public NavMeshData GenerateNavMeshDirect(float[] vertices, int[] indices, AgentConfig agentConfig,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         // Step 1: Create input geometry provider (no area filtering)
         var geomProvider = new SimpleInputGeomProvider(vertices, indices);
-        
+
+        if (offMeshLinks != null)
+        {
+            foreach (var link in offMeshLinks)
+            {
+                var s = new RcVec3f(link.Start.X, link.Start.Y, link.Start.Z);
+                var e = new RcVec3f(link.End.X,   link.End.Y,   link.End.Z);
+                // Use 2× agent radius as connection snap tolerance. The OBJ sphere marker
+                // centroid (even with minY) may sit up to one sphere-radius above the actual
+                // navmesh polygon; doubling the radius gives Detour enough search room to snap.
+                geomProvider.AddOffMeshConnection(s, e, agentConfig.Radius * 2f, bidir: true, area: 63, flags: 1);
+            }
+        }
+
         // Step 2: Calculate bounding box
         var (bmin, bmax) = CalculateBounds(vertices);
         
@@ -188,19 +202,20 @@ public class NavMeshGenerator
         
         Console.WriteLine($"[Direct] Build result: {buildResult.Mesh?.npolys ?? 0} polys, {buildResult.ContourSet?.conts?.Count ?? 0} contours");
         
-        // Step 6: Create Detour navigation mesh
-        var navMesh = CreateDetourNavMesh(buildResult, config, agentConfig);
-        
+        // Step 6: Create Detour navigation mesh (pass off-mesh connections for DtNavMeshCreateParams)
+        var navMesh = CreateDetourNavMesh(buildResult, config, agentConfig, geomProvider.GetOffMeshConnections());
+
         // Step 7: Create query object for pathfinding
         var query = new DtNavMeshQuery(navMesh);
-        
+
         return new NavMeshData(navMesh, query);
     }
-    
+
     /// <summary>
     /// Generates a navigation mesh directly from a list of triangles using DotRecast's recommended approach.
     /// </summary>
-    public NavMeshData GenerateNavMeshDirect(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, AgentConfig agentConfig)
+    public NavMeshData GenerateNavMeshDirect(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> indices, AgentConfig agentConfig,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         // Convert Vector3 list to float array
         var verticesArray = new float[vertices.Count * 3];
@@ -213,7 +228,7 @@ public class NavMeshGenerator
 
         var indicesArray = indices.ToArray();
 
-        return GenerateNavMeshDirect(verticesArray, indicesArray, agentConfig);
+        return GenerateNavMeshDirect(verticesArray, indicesArray, agentConfig, offMeshLinks);
     }
 
     /// <summary>
@@ -230,7 +245,8 @@ public class NavMeshGenerator
     /// A <see cref="NavMeshData"/> with <see cref="NavMeshData.IsMultiTile"/> = true.
     /// </returns>
     public NavMeshData GenerateTiledNavMesh(float[] vertices, int[] indices,
-        AgentConfig agentConfig, NavMeshConfiguration navConfig)
+        AgentConfig agentConfig, NavMeshConfiguration navConfig,
+        IReadOnlyList<OffMeshLinkDef>? offMeshLinks = null)
     {
         var (bmin, bmax) = CalculateBounds(vertices);
         bmin.Y -= agentConfig.CellHeight;
@@ -262,41 +278,77 @@ public class NavMeshGenerator
         int tileCountX = (int)Math.Ceiling(worldWidth / tileSize);
         int tileCountZ = (int)Math.Ceiling(worldDepth / tileSize);
 
-        Console.WriteLine($"[TiledNavMesh] Building {tileCountX}x{tileCountZ} tiles...");
+        // Tile size in voxels + border in voxels.
+        // borderSize must equal walkableRadius so agent-radius erosion doesn't eat tile edges,
+        // which would leave gaps at tile boundaries and prevent cross-tile portal links.
+        int tileSizeVoxels = (int)MathF.Round(tileSize / cellSize);
+        // Standard Recast formula: walkableRadius + 3 extra voxels safety margin so portal
+        // edges survive contour simplification and polygon clipping at tile boundaries.
+        int borderSize     = (int)MathF.Ceiling(agentConfig.Radius / cellSize) + 3;
+
+        Console.WriteLine($"[TiledNavMesh] Building {tileCountX}x{tileCountZ} tiles " +
+            $"(tileSizeVx={tileSizeVoxels}, borderSize={borderSize} vx)...");
 
         var geomProvider = new SimpleInputGeomProvider(vertices, indices);
+
+        if (offMeshLinks != null)
+        {
+            foreach (var link in offMeshLinks)
+            {
+                var s = new RcVec3f(link.Start.X, link.Start.Y, link.Start.Z);
+                var e = new RcVec3f(link.End.X,   link.End.Y,   link.End.Z);
+                geomProvider.AddOffMeshConnection(s, e, agentConfig.Radius * 2f, bidir: true, area: 63, flags: 1);
+            }
+            Console.WriteLine($"[TiledNavMesh] Registered {offMeshLinks.Count} off-mesh link(s)");
+        }
+
         var walkableAreaMod = new RcAreaModification(0x3f);
+
+        // Tiled RcConfig: UseTiles=true makes RcBuilderConfig expand each tile by borderSize,
+        // ensuring portal edges reach tile boundaries after agent-radius erosion.
+        float minRegionArea   = cellSize * cellSize;
+        float mergeRegionArea = 16f * cellSize * cellSize;
+        var tiledConfig = new RcConfig(
+            useTiles: true, tileSizeX: tileSizeVoxels, tileSizeZ: tileSizeVoxels, borderSize: borderSize,
+            RcPartition.WATERSHED, cellSize, cellHeight,
+            agentConfig.MaxSlope, agentConfig.Height, agentConfig.Radius, agentConfig.MaxClimb,
+            minRegionArea, mergeRegionArea,
+            agentConfig.Radius * 8.0f, 1.3f, 6,
+            cellSize * 6.0f, cellHeight,
+            true, true, true,
+            walkableAreaMod, true);
 
         for (int tz = 0; tz < tileCountZ; tz++)
         {
             for (int tx = 0; tx < tileCountX; tx++)
             {
-                var tileBmin = new RcVec3f(
-                    bmin.X + tx * tileSize,
-                    bmin.Y,
-                    bmin.Z + tz * tileSize);
-                var tileBmax = new RcVec3f(
-                    tileBmin.X + tileSize,
-                    bmax.Y,
-                    tileBmin.Z + tileSize);
-
-                var config = new RcConfig(
-                    RcPartition.WATERSHED, cellSize, cellHeight,
-                    agentConfig.MaxSlope, agentConfig.Height, agentConfig.Radius, agentConfig.MaxClimb,
-                    1, 4,
-                    agentConfig.Radius * 8.0f, 1.3f, 6,
-                    cellSize * 6.0f, cellHeight,
-                    true, true, true,
-                    walkableAreaMod, true);
-
-                var builderConfig = new RcBuilderConfig(config, tileBmin, tileBmax);
-                var builder = new RcBuilder();
-                var buildResult = builder.Build(geomProvider, builderConfig, keepInterResults: false);
+                // Pass world-origin bmin/bmax + tile index.
+                // RcBuilderConfig computes the tile's core bounds from origin + index,
+                // then expands by borderSize for geometry querying.
+                var builderConfig = new RcBuilderConfig(tiledConfig, bmin, bmax, tx, tz);
+                var builder       = new RcBuilder();
+                var buildResult   = builder.Build(geomProvider, builderConfig, keepInterResults: false);
 
                 if (buildResult?.Mesh == null || buildResult.Mesh.npolys == 0)
                     continue; // Empty tile — skip
 
-                var tileData = BuildTileData(buildResult, config, agentConfig, tx, tz);
+                // Filter off-mesh connections to those whose start point is in this tile's core XZ bounds.
+                var allConns = geomProvider.GetOffMeshConnections();
+                List<RcOffMeshConnection>? tileConns = null;
+                if (allConns.Count > 0)
+                {
+                    float tileMinX = bmin.X + tx * tileSize;
+                    float tileMaxX = tileMinX + tileSize;
+                    float tileMinZ = bmin.Z + tz * tileSize;
+                    float tileMaxZ = tileMinZ + tileSize;
+                    tileConns = allConns
+                        .Where(c => c.verts[0] >= tileMinX && c.verts[0] <= tileMaxX
+                                 && c.verts[2] >= tileMinZ && c.verts[2] <= tileMaxZ)
+                        .ToList();
+                    if (tileConns.Count == 0) tileConns = null;
+                }
+
+                var tileData = BuildTileData(buildResult, tiledConfig, agentConfig, tx, tz, tileConns);
                 if (tileData == null) continue;
 
                 navMesh.AddTile(tileData, 0, 0, out _);
@@ -308,7 +360,9 @@ public class NavMeshGenerator
         var query = new DtNavMeshQuery(navMesh);
         return new NavMeshData(navMesh, query, isMultiTile: true, tileSize: tileSize,
             sourceVertices: vertices, sourceIndices: indices, navConfig: navConfig,
-            tileOriginX: bmin.X, tileOriginZ: bmin.Z);
+            tileOriginX: bmin.X, tileOriginZ: bmin.Z,
+            worldBminY: bmin.Y, worldBmaxY: bmax.Y,
+            offMeshLinks: offMeshLinks);
     }
 
     /// <summary>
@@ -316,7 +370,8 @@ public class NavMeshGenerator
     /// Used by both <see cref="GenerateTiledNavMesh"/> and runtime tile rebuilds.
     /// </summary>
     public DtMeshData? BuildTileData(RcBuilderResult buildResult, RcConfig config,
-        AgentConfig agentConfig, int tileX, int tileZ)
+        AgentConfig agentConfig, int tileX, int tileZ,
+        List<RcOffMeshConnection>? offMeshConnections = null)
     {
         var mesh = buildResult.Mesh;
         var meshDetail = buildResult.MeshDetail;
@@ -350,7 +405,8 @@ public class NavMeshGenerator
             ch = config.Ch,
             buildBvTree = true,
             tileX = tileX,
-            tileLayer = tileZ
+            tileZ = tileZ,
+            tileLayer = 0
         };
 
         if (meshDetail != null)
@@ -362,9 +418,38 @@ public class NavMeshGenerator
             navMeshCreateParams.detailTriCount = meshDetail.ntris;
         }
 
+        if (offMeshConnections != null && offMeshConnections.Count > 0)
+        {
+            int n = offMeshConnections.Count;
+            navMeshCreateParams.offMeshConVerts   = new float[n * 6];
+            navMeshCreateParams.offMeshConRad     = new float[n];
+            navMeshCreateParams.offMeshConFlags   = new int[n];
+            navMeshCreateParams.offMeshConAreas   = new int[n];
+            navMeshCreateParams.offMeshConDir     = new int[n];
+            navMeshCreateParams.offMeshConUserID  = new int[n];
+            navMeshCreateParams.offMeshConCount   = n;
+            for (int i = 0; i < n; i++)
+            {
+                int b = i * 6;
+                var c = offMeshConnections[i];
+                navMeshCreateParams.offMeshConVerts[b]     = c.verts[0];
+                navMeshCreateParams.offMeshConVerts[b + 1] = c.verts[1];
+                navMeshCreateParams.offMeshConVerts[b + 2] = c.verts[2];
+                navMeshCreateParams.offMeshConVerts[b + 3] = c.verts[3];
+                navMeshCreateParams.offMeshConVerts[b + 4] = c.verts[4];
+                navMeshCreateParams.offMeshConVerts[b + 5] = c.verts[5];
+                navMeshCreateParams.offMeshConRad[i]    = c.radius;
+                navMeshCreateParams.offMeshConFlags[i]  = c.flags;
+                navMeshCreateParams.offMeshConAreas[i]  = c.area;
+                navMeshCreateParams.offMeshConDir[i]    = c.bidir ? 1 : 0;
+                navMeshCreateParams.offMeshConUserID[i] = c.userId;
+            }
+            Console.WriteLine($"[TiledNavMesh] Tile ({tileX},{tileZ}): baked {n} off-mesh connection(s)");
+        }
+
         return DtNavMeshBuilder.CreateNavMeshData(navMeshCreateParams);
     }
-    
+
     /// <summary>
     /// Calculates the bounding box of the geometry.
     /// </summary>
@@ -507,7 +592,8 @@ public class NavMeshGenerator
     /// <summary>
     /// Creates DtNavMesh from RcBuilder result.
     /// </summary>
-    private DtNavMesh CreateDetourNavMesh(RcBuilderResult buildResult, RcConfig config, AgentConfig agentConfig)
+    private DtNavMesh CreateDetourNavMesh(RcBuilderResult buildResult, RcConfig config, AgentConfig agentConfig,
+        List<RcOffMeshConnection>? offMeshConnections = null)
     {
         var mesh = buildResult.Mesh;
         var meshDetail = buildResult.MeshDetail;
@@ -598,7 +684,39 @@ public class NavMeshGenerator
         navMeshCreateParams.buildBvTree = true;
         navMeshCreateParams.tileX = 0;
         navMeshCreateParams.tileLayer = 0;
-        
+
+        // Populate off-mesh connections so Detour bakes them into the NavMesh
+        if (offMeshConnections != null && offMeshConnections.Count > 0)
+        {
+            int n = offMeshConnections.Count;
+            navMeshCreateParams.offMeshConVerts   = new float[n * 6];
+            navMeshCreateParams.offMeshConRad     = new float[n];
+            navMeshCreateParams.offMeshConFlags   = new int[n];
+            navMeshCreateParams.offMeshConAreas   = new int[n];
+            navMeshCreateParams.offMeshConDir     = new int[n];
+            navMeshCreateParams.offMeshConUserID  = new int[n];
+            navMeshCreateParams.offMeshConCount   = n;
+
+            for (int i = 0; i < n; i++)
+            {
+                var c = offMeshConnections[i];
+                int b = i * 6;
+                navMeshCreateParams.offMeshConVerts[b]     = c.verts[0];
+                navMeshCreateParams.offMeshConVerts[b + 1] = c.verts[1];
+                navMeshCreateParams.offMeshConVerts[b + 2] = c.verts[2];
+                navMeshCreateParams.offMeshConVerts[b + 3] = c.verts[3];
+                navMeshCreateParams.offMeshConVerts[b + 4] = c.verts[4];
+                navMeshCreateParams.offMeshConVerts[b + 5] = c.verts[5];
+                navMeshCreateParams.offMeshConRad[i]    = c.radius;
+                navMeshCreateParams.offMeshConFlags[i]  = c.flags;
+                navMeshCreateParams.offMeshConAreas[i]  = c.area;
+                navMeshCreateParams.offMeshConDir[i]    = c.bidir ? 1 : 0;
+                navMeshCreateParams.offMeshConUserID[i] = c.userId;
+            }
+
+            Console.WriteLine($"Baking {n} off-mesh connection(s) into NavMesh");
+        }
+
         Console.WriteLine($"Creating navmesh data with {navMeshCreateParams.polyCount} polygons...");
         
         // Build navmesh data

@@ -10,4 +10,8 @@
     <PackageReference Include="System.Text.Json" Version="10.0.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Spatial.Pathfinding\Spatial.Pathfinding.csproj" />
+  </ItemGroup>
+
 </Project>

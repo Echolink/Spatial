@@ -1,4 +1,5 @@
 using System.Numerics;
+using Spatial.Pathfinding;
 
 namespace Spatial.MeshLoading.Data;
 
@@ -22,6 +23,11 @@ public class WorldData
     /// All meshes in the world
     /// </summary>
     public List<MeshData> Meshes { get; set; } = new();
+
+    /// <summary>
+    /// Off-mesh link connections detected from marker geometry (offmesh_* OBJ groups).
+    /// </summary>
+    public List<OffMeshLinkDef> OffMeshLinks { get; } = new();
     
     /// <summary>
     /// Global transform to apply to all meshes

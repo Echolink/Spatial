@@ -38,11 +38,12 @@ public static class TestAgentCollision
             
             // Create simple ground
             var groundShape = physicsWorld.CreateBoxShape(new Vector3(50, 0.1f, 50));
-            physicsWorld.RegisterEntity(
+            physicsWorld.RegisterEntityWithInertia(
                 entityId: 1000,
                 entityType: EntityType.StaticObject,
                 position: new Vector3(0, -0.05f, 0),
                 shape: groundShape,
+                inertia: default,
                 isStatic: true
             );
             

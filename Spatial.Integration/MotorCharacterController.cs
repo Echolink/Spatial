@@ -1,4 +1,5 @@
 using Spatial.Physics;
+using Spatial.Pathfinding;
 using System.Numerics;
 using System.Collections.Generic;
 using BepuPhysics;
@@ -44,9 +45,22 @@ public class MotorCharacterController : ICharacterController
     
     // Track desired velocity goals for each entity
     private readonly Dictionary<int, Vector3> _velocityGoals = new();
-    
+
     // Track contact normal for each entity (averaged across all ground contacts)
     private readonly Dictionary<int, Vector3> _supportNormal = new();
+
+    // Off-mesh link traversal state
+    private readonly Dictionary<int, LinkTraversalData> _traversalData = new();
+
+    // Entities that just teleported — skip UpdateGroundedState for 1 tick so BepuPhysics
+    // has time to register ground contacts after SetEntityPosition.
+    private readonly HashSet<int> _justTeleported = new();
+
+    private record LinkTraversalData(
+        Vector3 Entry, Vector3 Exit,
+        float Duration, float Elapsed,
+        float ArcHeight, LinkArcShape ArcShape,
+        OffMeshLinkType LinkType);
     
     /// <summary>
     /// Creates a new motor-based character controller.
@@ -100,6 +114,10 @@ public class MotorCharacterController : ICharacterController
     /// </summary>
     public void UpdateGroundedState(PhysicsEntity entity, float deltaTime)
     {
+        // Skip for one tick after teleport — BepuPhysics needs a step to register contacts.
+        if (_justTeleported.Remove(entity.EntityId))
+            return;
+
         var velocity = _physicsWorld.GetEntityVelocity(entity);
         var currentState = GetState(entity);
         
@@ -115,37 +133,58 @@ public class MotorCharacterController : ICharacterController
         {
             case CharacterState.GROUNDED:
                 if (!isOnGround)
-                {
-                    // Lost ground contact - transition to AIRBORNE
                     SetAirborne(entity);
-                }
                 break;
-                
+
             case CharacterState.AIRBORNE:
                 if (isOnGround)
                 {
-                    // Landed - transition to RECOVERING
                     SetRecovering(entity);
                     _recoveryTimers[entity.EntityId] = 0f;
                 }
                 break;
-                
+
             case CharacterState.RECOVERING:
                 if (!isOnGround)
                 {
-                    // Lost ground again - back to AIRBORNE
                     SetAirborne(entity);
                     _recoveryTimers.Remove(entity.EntityId);
                 }
                 else
                 {
-                    // Continue recovering
                     _recoveryTimers[entity.EntityId] = _recoveryTimers.GetValueOrDefault(entity.EntityId, 0f) + deltaTime;
-                    
-                    // Check if stable enough to return to GROUNDED
                     if (_recoveryTimers[entity.EntityId] >= _config.StabilityThreshold)
-                    {
                         SetGrounded(entity);
+                }
+                break;
+
+            case CharacterState.LINK_TRAVERSAL:
+                // Motor drives position; ground contacts must not interrupt the arc
+                if (_traversalData.TryGetValue(entity.EntityId, out var td))
+                {
+                    td = td with { Elapsed = td.Elapsed + deltaTime };
+                    _traversalData[entity.EntityId] = td;
+
+                    float t = Math.Clamp(td.Elapsed / td.Duration, 0f, 1f);
+                    var horizontal = Vector3.Lerp(td.Entry, td.Exit, t);
+
+                    // horizontal.Y already lerps from entry to exit — add only the extra arc offset.
+                    // Parabola uses sin²(πt): zero-derivative at both endpoints gives smooth lift-off
+                    // and landing (no position snap). sin(πt) alone has slope ≈π at landing.
+                    float yOffset = td.ArcShape switch
+                    {
+                        LinkArcShape.Parabola => MathF.Pow(MathF.Sin(MathF.PI * t), 2f) * td.ArcHeight,
+                        _                     => 0f
+                    };
+                    var targetPos = new Vector3(horizontal.X, horizontal.Y + yOffset, horizontal.Z);
+
+                    _physicsWorld.SetEntityPosition(entity, targetPos);
+                    _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+
+                    if (t >= 1f)
+                    {
+                        _traversalData.Remove(entity.EntityId);
+                        SetRecovering(entity);
                     }
                 }
                 break;
@@ -361,6 +400,41 @@ public class MotorCharacterController : ICharacterController
     }
     
     /// <summary>
+    /// Initiates kinematic arc traversal of an off-mesh link.
+    /// Teleport links are resolved instantly.
+    /// </summary>
+    public void BeginLinkTraversal(PhysicsEntity entity, Vector3 entry, Vector3 exit, OffMeshLinkType type)
+    {
+        if (type == OffMeshLinkType.Teleport)
+        {
+            _physicsWorld.SetEntityPosition(entity, exit);
+            _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+            _entityStates[entity.EntityId] = CharacterState.GROUNDED;
+            _justTeleported.Add(entity.EntityId);
+            Console.WriteLine($"[MotorCharacterController] Teleport: entity {entity.EntityId} snapped to {exit}");
+            return;
+        }
+
+        var cfg = LinkTraversalDefaults.ByType[type];
+        float horizDist = Vector3.Distance(new Vector3(entry.X, 0, entry.Z), new Vector3(exit.X, 0, exit.Z));
+        float duration  = Math.Max(horizDist / cfg.Speed, cfg.MinDuration);
+        float arcHeight = horizDist * cfg.ArcHeightScale;
+
+        _traversalData[entity.EntityId] = new LinkTraversalData(
+            entry, exit, duration, 0f, arcHeight, cfg.ArcShape, type);
+        _entityStates[entity.EntityId] = CharacterState.LINK_TRAVERSAL;
+    }
+
+    /// <summary>
+    /// Returns traversal type and normalized progress for the entity, or null if not traversing.
+    /// </summary>
+    public (OffMeshLinkType Type, float T)? GetTraversalInfo(int entityId)
+    {
+        if (!_traversalData.TryGetValue(entityId, out var td)) return null;
+        return (td.LinkType, Math.Clamp(td.Elapsed / td.Duration, 0f, 1f));
+    }
+
+    /// <summary>
     /// Cleans up state for a removed entity.
     /// </summary>
     public void RemoveEntity(int entityId)
@@ -370,6 +444,7 @@ public class MotorCharacterController : ICharacterController
         _recoveryTimers.Remove(entityId);
         _velocityGoals.Remove(entityId);
         _supportNormal.Remove(entityId);
+        _traversalData.Remove(entityId);
     }
 }
 

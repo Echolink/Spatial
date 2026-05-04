@@ -1,6 +1,6 @@
 # Production Architecture Guide
 
-**Last Updated**: 2026-01-26  
+**Last Updated**: 2026-05-04  
 **Status**: ✅ Production Ready  
 **Decision**: Motor-Based Character Controller
 
@@ -22,83 +22,42 @@ After comprehensive testing in Phase 4, the motor-based approach has been adopte
 ```csharp
 using Spatial.Integration;
 using Spatial.Pathfinding;
-using Spatial.Physics;
 
-// 1. Create physics world
-var physicsConfig = new PhysicsConfiguration
-{
-    Gravity = new Vector3(0, -9.81f, 0),
-    Timestep = 0.016f
-};
-var physicsWorld = new PhysicsWorld(physicsConfig);
-
-// 2. Create agent configuration (single source of truth)
+// 1. Agent configuration — single source of truth for this map
 var agentConfig = new AgentConfig
 {
-    Height = 2.0f,
-    Radius = 0.4f,
+    Height   = 2.0f,
+    Radius   = 0.4f,
     MaxSlope = 45.0f,
-    MaxClimb = 0.5f  // Critical for path validation
+    MaxClimb = 0.5f,  // ⚠️ Critical for path validation
 };
 
-// 3. Build NavMesh
-var navMeshGenerator = new NavMeshGenerator();
-var navMeshBuilder = new NavMeshBuilder(physicsWorld, navMeshGenerator);
-var navMeshData = navMeshBuilder.BuildNavMeshDirect(agentConfig);
+// 2. Bake NavMesh once at startup — reuse across all rooms on this map
+string meshPath = Path.Combine(AppContext.BaseDirectory, "worlds", "arena.obj");
+NavMeshData baked = World.BakeNavMesh(meshPath, agentConfig);
 
-// 4. Create pathfinder and pathfinding service
-var pathfinder = new Pathfinder(navMeshData);
-var pathfindingConfig = new PathfindingConfiguration
+// 3. One World per room — cheap to construct, fully isolated physics
+using var world = new World(baked, agentConfig);
+
+// 4. Register events immediately after construction
+world.OnDestinationReached += (id, pos) => { /* award XP, trigger idle AI */ };
+world.OnPathReplanned      += id         => { /* log metric */ };
+world.OnMovementStarted    += (id, s, t) => { /* play move animation */ };
+
+// 5. Spawn units
+world.Spawn(entityId: playerId, position: spawnPoint, EntityType.Player);
+
+// 6. Issue movement
+MovementResponse response = world.Move(playerId, targetPosition, speed: 5f);
+if (!response.Success)
+    HandleFailure(response.FailureReason);
+
+// 7. Fixed-timestep game loop (125 Hz recommended)
+while (running)
 {
-    PathAutoFix = true,       // ✅ Keep enabled
-    PathValidation = true     // ✅ Keep enabled
-};
-var pathfindingService = new PathfindingService(
-    pathfinder, 
-    agentConfig, 
-    pathfindingConfig
-);
-
-// 5. ✅ PRODUCTION: Create motor-based controller
-var motorController = new MotorCharacterController(physicsWorld);
-
-// 6. Create movement controller with motor
-var movementController = new MovementController(
-    physicsWorld,
-    pathfindingService,
-    agentConfig,
-    pathfindingConfig,
-    motorController  // ✅ Motor-based (RECOMMENDED)
-);
-
-// 7. Spawn agent
-var (agentShape, agentInertia) = physicsWorld.CreateCapsuleShapeWithInertia(
-    agentConfig.Radius, 
-    agentConfig.Height, 
-    mass: 1.0f
-);
-var agent = physicsWorld.RegisterEntityWithInertia(
-    entityId: 1,
-    entityType: EntityType.Player,
-    position: spawnPosition,
-    shape: agentShape,
-    inertia: agentInertia,
-    isStatic: false
-);
-
-// 8. Request movement
-var moveRequest = new MovementRequest(
-    entityId: 1,
-    targetPosition: goalPosition,
-    maxSpeed: 5.0f
-);
-var response = movementController.RequestMovement(moveRequest);
-
-// 9. Update loop
-while (simulation_running)
-{
-    movementController.UpdateMovement(deltaTime);
-    physicsWorld.Update(deltaTime);
+    world.Update(0.008f);  // movement then physics — order matters
+    Vector3 pos = world.GetPosition(playerId);
+    // broadcast pos to clients
 }
 ```
 
@@ -304,6 +263,83 @@ if (path.Success && path.IsPartial)
 
 ---
 
+## Dynamic NavMesh Tile Updates (Obstacle Rebake)
+
+**Added**: 2026-04-30
+
+The NavMesh supports runtime tile rebuilds so that spawned or despawned obstacles
+are reflected in pathfinding without regenerating the whole mesh.
+
+### Setup — enable tile updates at bake time
+
+```csharp
+var navConfig = new NavMeshConfiguration
+{
+    EnableTileUpdates = true,  // required
+    TileSize = 8               // world-space tile edge length in metres
+};
+var navMeshData = new NavMeshBuilder(physicsWorld, new NavMeshGenerator())
+    .BuildTiledNavMeshDirect(agentConfig, navConfig);
+```
+
+### Spawning an obstacle (erase tiles)
+
+```csharp
+// 1. Add physics body
+var (shape, inertia) = physicsWorld.CreateBoxShapeWithInertia(obstacleSize, mass: 1f);
+var entity = physicsWorld.RegisterEntityWithInertia(id, EntityType.Obstacle, center, shape, inertia, isStatic: true);
+
+// 2. Erase NavMesh tiles that overlap the obstacle — pass empty geometry arrays
+float radius = MathF.Max(obstacleSize.X, obstacleSize.Z) * 0.5f + 0.5f; // half-extent + margin
+pfService.RebuildNavMeshRegion(obstacleBase, radius, [], [], navMeshData.NavConfig!);
+
+// 3. Replan any active paths that crossed the erased tiles
+movementController.RequestMovement(new MovementRequest(agentId, goal, maxSpeed));
+```
+
+### Despawning an obstacle (restore tiles from original geometry)
+
+```csharp
+// 1. Remove physics body
+physicsWorld.UnregisterEntity(obstacleEntity);
+
+// 2. Restore tiles using the source geometry stored on NavMeshData
+pfService.RebuildNavMeshRegion(
+    obstacleBase, radius,
+    navMeshData.SourceVertices!, navMeshData.SourceIndices!,
+    navMeshData.NavConfig!);
+
+// 3. Re-issue movement so the agent can use the restored direct route
+movementController.RequestMovement(new MovementRequest(agentId, goal, maxSpeed));
+```
+
+### Tile granularity — the "minimum erasure unit"
+
+`RebuildNavMeshRegion` maps the radius to a tile-index range and rebuilds **whole tiles**
+only. A 3 × 3 obstacle at `TileSize = 8` erases an 8 × 8 world-space tile, not just the
+3 × 3 footprint. Use a smaller `TileSize` for finer granularity at the cost of more tiles
+to build at bake time and more tiles to rebuild at runtime.
+
+### Typical TileSize guidance
+
+| `TileSize` | Tile area | Good for |
+|---|---|---|
+| 4 | 4 × 4 m | Fine-grained indoor obstacles |
+| 8 | 8 × 8 m | Medium arenas (default test value) |
+| 16–32 | 16 × 16 – 32 × 32 m | Large open-world maps |
+
+### Test
+
+```bash
+dotnet run --project Spatial.TestHarness -- obstacle-rebake-visual
+```
+
+Runs a three-phase visual scenario on a 24 × 24 arena: agent walks freely → obstacle
+spawns and centre tile is erased → agent detours → obstacle despawns and tile restores →
+agent takes the direct route again.
+
+---
+
 ## Migration Guide
 
 ### From Velocity-Based to Motor-Based
@@ -448,7 +484,7 @@ MovementController (coordinates everything)
 Tested with:
 - ✅ 5 agents: 60% success rate
 - ✅ 10 agents: Validated in stress tests
-- 📊 50+ agents: Not yet tested (future Phase 5)
+- ✅ 50 agents: `dotnet run --project Spatial.TestHarness -- scale 50`
 
 Expected scaling: Linear with agent count (no quadratic issues)
 
@@ -456,20 +492,9 @@ Expected scaling: Linear with agent count (no quadratic issues)
 
 ## Related Documentation
 
-### Phase 4 Audit Results
-- `PHASE4_DECISION_AND_VALIDATION.md` - Final decision and validation
-- `PHASE2_MOTOR_IMPLEMENTATION.md` - Motor controller implementation
-- `MOTOR_VS_VELOCITY_USAGE.md` - Comparison test usage
-
-### System Design
-- `PATH_VALIDATION_IMPLEMENTATION.md` - PathAutoFix system
-- `CONFIGURATION_ALIGNMENT_SUMMARY.md` - AgentConfig unification
-- `NAVMESH_PATH_ANALYSIS.md` - Root cause analysis
-
-### Integration Guides
-- `IMPLEMENTATION_SUMMARY.md` - Overall system architecture
-- `GAME_SERVER_INTEGRATION_GUIDE.md` - Game server integration
-- `MOVEMENT_FLOW_GUIDE.md` - Movement system flow
+- [GAME_SERVER_INTEGRATION.md](GAME_SERVER_INTEGRATION.md) — full World API, events, game loop, multi-size agents
+- [GAME_SERVER_FAQ.md](GAME_SERVER_FAQ.md) — common integration questions
+- [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) — module overview and high-level architecture
 
 ---
 

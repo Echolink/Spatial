@@ -99,10 +99,11 @@ artifacts/
 # macOS
 .DS_Store
 
+# Claude Code local scratch files
+.claude/
+
 # Temporary development notes and session artifacts
 UPDATE_*.md
-PROJECT_SUMMARY.md
-GAME_SERVER_INTEGRATION.md
 SAMPLE_OUTPUT_EXPLAINED.md
 sample_output.txt
 

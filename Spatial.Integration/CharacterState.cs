@@ -22,5 +22,11 @@ public enum CharacterState
     /// Agent recently landed and is stabilizing.
     /// Brief state before transitioning back to GROUNDED and replanning path.
     /// </summary>
-    RECOVERING
+    RECOVERING,
+
+    /// <summary>
+    /// Agent is traversing an off-mesh link via kinematic arc.
+    /// Physics forces are ignored; position is driven by the arc formula.
+    /// </summary>
+    LINK_TRAVERSAL
 }

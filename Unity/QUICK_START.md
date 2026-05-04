@@ -25,8 +25,8 @@ Copy to Unity `Assets/Spatial/`:
 ### 4. Run
 ```bash
 # Terminal 1: Start C# server
-cd "c:\Users\nikog\Documents\Project\Physics"
-dotnet run --project Spatial.TestHarness
+cd "c:\Users\nikog\Documents\Project\Spatial"
+dotnet run --project Spatial.TestHarness -- enhanced
 
 # Wait for: "[Info] Waiting 3 seconds for Unity client to connect..."
 

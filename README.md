@@ -1,264 +1,124 @@
-# Spatial Systems Integration
+# Spatial
 
-**Complete integration between BepuPhysics v2 and DotRecast for game server development with real-time 3D visualization!**
+Server-authoritative physics and pathfinding framework for multiplayer game servers (.NET 8.0).
 
-## 🎉 Status: PRODUCTION READY ✅
+## What It Does
 
-All systems are operational, tested, and validated for production deployment!
+Spatial provides a trusted, cheat-proof movement backbone for multiplayer games. The server owns all positions and paths — clients never fake movement.
 
-**🚀 For production use, see: [`PRODUCTION_ARCHITECTURE.md`](PRODUCTION_ARCHITECTURE.md)**
+- **NavMesh generation** — converts a 3D level mesh (`.obj`) into a walkable polygon network
+- **Pathfinding** — A* via DotRecast, with per-segment validation (MaxClimb/MaxSlope) and automatic waypoint insertion
+- **Physics simulation** — BepuPhysics v2 capsule bodies with gravity, collision, and constraint-based movement at 125 Hz
+- **Movement control** — path-following, local avoidance, automatic replanning, knockback, jump
+- **Multi-size agents** — separate NavMesh baked per `AgentConfig`; each unit routes on its own mesh
+- **Runtime NavMesh updates** — tile-based partial rebuilds for doors, destructibles, and resource nodes
 
-### Latest Update (2026-01-26)
+The `Unity/` client is a debug visualization tool only — not a game client.
 
-**✅ Motor-Based Character Controller** adopted as production standard after comprehensive Phase 4 testing:
-- **2x efficiency**: 51.5% less distance traveled
-- **Zero replanning**: Perfect path following
-- **32% faster**: Improved completion time
-- **Better stability**: Handles steep terrain and multi-level navigation
-- **Agent-3 validated**: Solves complex 10m climb scenario
+## Architecture
 
-**Production Stack**: MotorCharacterController + PathAutoFix + AgentConfig Alignment
-
-## 📦 Project Structure
-
-### Core Libraries
-- **Spatial.Physics** - BepuPhysics v2.4.0 wrapper
-  - Physics simulation with gravity
-  - Collision detection and resolution
-  - Static and dynamic entities
-  - Capsule, Box, and Sphere shapes
-
-- **Spatial.Pathfinding** - DotRecast 2026.1.1 wrapper
-  - NavMesh generation from geometry
-  - Pathfinding queries
-  - Valid position checking
-  - Agent configuration
-
-- **Spatial.Integration** - Physics-Pathfinding bridge
-  - NavMesh building from physics world
-  - Movement controller for physics-based agents
-  - Pathfinding service API
-
-- **Spatial.Server** - Real-time visualization server ✨ NEW!
-  - WebSocket server for broadcasting simulation state
-  - JSON serialization of entities, NavMesh, and paths
-  - Client connection management
-
-### Applications
-- **Spatial.TestHarness** - Integration tests
-  - Physics collision tests
-  - NavMesh generation tests (Direct DotRecast approach - 2x better quality!)
-  - Full pathfinding integration tests
-  - Real-time visualization broadcasting
-  - ⭐ **Enhanced Simulation Test** - Production-ready validation suite with detailed metrics
-
-- **Unity/** - 3D Visualization client ✨ NEW!
-  - Real-time entity rendering
-  - NavMesh surface visualization
-  - Path and waypoint display
-  - See [Unity/README.md](Unity/README.md) for setup
-
-## ✨ Features
-
-### Physics (BepuPhysics v2.4.0)
-✅ Gravity and forces  
-✅ Collision detection and resolution  
-✅ Static and dynamic bodies  
-✅ SpringSettings for stable contacts  
-✅ Multiple shape types  
-✅ Velocity-based movement  
-
-### Pathfinding (DotRecast 2026.1.1)
-✅ NavMesh generation from physics geometry  
-✅ Pathfinding with DtNavMeshQuery  
-✅ Waypoint paths  
-✅ Valid position testing  
-✅ Polygon-accurate navigation  
-
-### Movement Integration
-✅ Physics-based agent movement  
-✅ Waypoint following  
-✅ Path request and execution  
-✅ Collision-aware navigation  
-✅ **Agent blocking behavior** - Agents block each other instead of pushing  
-✅ **Explicit push mechanics** - Push, knockback, and explosion forces  
-✅ **Local avoidance system** - Steering behaviors for dynamic obstacles  
-
-### 3D Visualization ✨ NEW!
-✅ Real-time WebSocket streaming  
-✅ Unity client for 3D viewing  
-✅ Entity rendering (Box, Capsule, Sphere)  
-✅ NavMesh surface visualization  
-✅ Path and waypoint display  
-✅ Velocity vector visualization  
-
-## 🚀 Quick Start
-
-### 1. Run the Tests
-
-```bash
-cd "c:\Users\nikog\Documents\Project\Physics"
-dotnet run --project Spatial.TestHarness
+```
+Game Server Code
+    └── World  (Spatial.Integration) — single entry point
+        ├── MovementController        — path-following, local avoidance, replanning
+        │   ├── PathfindingService    — DotRecast A* + path validation + PathAutoFix
+        │   │   └── Pathfinder        — raw NavMesh polygon queries
+        │   └── PathSegmentValidator  — MaxClimb/MaxSlope checks
+        └── MotorCharacterController  — BepuPhysics constraint-based movement (production standard)
+            └── PhysicsWorld          — BepuPhysics v2 wrapper (125 Hz)
 ```
 
-This will:
-- Start the physics simulation
-- Generate NavMesh from obstacles
-- Calculate paths
-- Test agent movement
-- **Start visualization server** on port 8181
+## Quick Start
 
-### 2. View in 3D (Optional but Recommended!)
+```bash
+dotnet build Spatial.sln
 
-Follow the [Unity Setup Guide](Unity/QUICK_START.md) to see your simulation in real-time 3D!
+dotnet run --project Spatial.TestHarness -- enhanced          # 5-agent showcase
+dotnet run --project Spatial.TestHarness -- enhanced 10       # 10-agent stress test
+dotnet run --project Spatial.TestHarness -- scale 50          # 50-agent scale test
+dotnet run --project Spatial.TestHarness -- motor-vs-velocity # controller comparison
+dotnet run --project Spatial.TestHarness -- obstacle-rebake-visual  # tiled NavMesh rebake demo
+dotnet run --project Spatial.TestHarness -- agent-collision
+dotnet run --project Spatial.TestHarness -- local-avoidance
+dotnet run --project Spatial.TestHarness -- path-validation
+```
 
-**Quick Setup:**
-1. Install Unity 2021.3+
-2. Add NativeWebSocket and Newtonsoft.Json packages
-3. Import Unity scripts
-4. Press Play while simulation is running
+Each mode starts a WebSocket server on port 8181. Connect the Unity client for real-time 3D visualization — see [Unity/QUICK_START.md](Unity/QUICK_START.md).
 
-See beautiful real-time visualization instead of just numbers!
+## Integrating into Your Game Server
 
-## 📊 Test Results
+The `World` façade is the single entry point:
 
-### Test 1: Physics Collision ✅
-- Entity falls with gravity (9.81 m/s²)
-- Collides with ground plane
-- Bounces and settles at y=1.50
-- No NaN values - physics stable!
+```csharp
+var agentConfig = new AgentConfig { Height = 2.0f, Radius = 0.4f, MaxSlope = 45f, MaxClimb = 0.5f };
 
-### Test 2: Full Integration ✅
-- NavMesh generated: 20 vertices, 10 triangles, 3 walkable polygons
-- Path found: 2 waypoints, length 7.07 units
-- Agent moves from (0,1,0) toward (5,1,5)
-- Distance reduced from 7.09 to 3.82 units in 1 second
-- Movement speed: 3 units/second
+// Bake once at startup (100–500 ms), share across all rooms on this map
+NavMeshData baked = World.BakeNavMesh("worlds/arena.obj", agentConfig);
 
-## 📚 Documentation
+// One World per room — cheap to create, fully isolated physics
+using var world = new World(baked, agentConfig);
+world.OnDestinationReached += (id, pos) => { /* trigger idle AI, rewards, etc. */ };
 
-- **[DOTRECAST_INTEGRATION_STATUS.md](DOTRECAST_INTEGRATION_STATUS.md)** - Complete integration details
-- **[MOVEMENT_FLOW_GUIDE.md](MOVEMENT_FLOW_GUIDE.md)** - Movement system documentation
-- **[AGENT_COLLISION_GUIDE.md](AGENT_COLLISION_GUIDE.md)** - Agent collision and push mechanics guide
-- **[Unity/README.md](Unity/README.md)** - 3D visualization setup
-- **[Unity/QUICK_START.md](Unity/QUICK_START.md)** - 5-minute setup guide
+// Per-tick game loop
+world.Spawn(playerId, spawnPosition);
+world.Move(playerId, clickedPosition);
+world.Update(0.008f);  // fixed 125 Hz timestep
+Vector3 pos = world.GetPosition(playerId);
+```
 
-## 🔧 Requirements
+See [docs/GAME_SERVER_INTEGRATION.md](docs/GAME_SERVER_INTEGRATION.md) for the full guide.
+
+## Project Structure
+
+| Module | Purpose |
+|--------|---------|
+| `Spatial.Physics` | BepuPhysics v2.4.0 wrapper — gravity, collision, deterministic 125 Hz simulation |
+| `Spatial.Pathfinding` | DotRecast 2026.1.1 — NavMesh generation and A* queries |
+| `Spatial.Integration` | `World` façade, movement orchestration, local avoidance, NavMesh builder |
+| `Spatial.Server` | Fleck WebSocket server — broadcasts simulation state to Unity (port 8181) |
+| `Spatial.MeshLoading` | OBJ mesh loader with group metadata and off-mesh link detection |
+| `Spatial.TestHarness` | All test/demo entry points; `Program.cs` is the CLI router |
+| `Unity/` | Real-time 3D visualization client |
+
+## Features
+
+### Movement
+- `MotorCharacterController` — constraint-based movement via BepuPhysics motor (51.5% less path deviation, 32% faster, zero replanning vs velocity-based)
+- `PathAutoFix` — automatically inserts intermediate waypoints for segments that exceed MaxClimb/MaxSlope
+- Option D tiered fallback for unreachable targets: nearest reachable → furthest reachable toward target → hard cancel
+- Local avoidance — agents steer around each other without triggering replanning
+- Knockback and jump with automatic pathfinding pause on launch and resume on landing
+
+### NavMesh
+- Multi-size agents — `MultiAgentNavMesh` bakes one NavMesh per `AgentConfig`; each spawned unit routes on its own mesh
+- Runtime tile updates — `SpawnObstacle`/`DespawnObstacle` atomically update physics collider and NavMesh tiles (~1–5 ms per operation)
+- Tiled NavMesh via `NavMeshConfiguration { EnableTileUpdates = true }` — required for all runtime updates
+
+### Game Server API
+- `World` façade — create, spawn, move, update, despawn in ~10 lines
+- `NavMeshData` is read-only and safe to share across rooms using the same map
+- Events: `OnDestinationReached`, `OnMovementStarted`, `OnPathReplanned`, `OnMovementProgress`
+- Queries: `GetPosition`, `GetVelocity`, `GetState` (`GROUNDED` / `AIRBORNE` / `RECOVERING`)
+
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [docs/GAME_SERVER_INTEGRATION.md](docs/GAME_SERVER_INTEGRATION.md) | Full integration guide — World API, events, game loop, multi-size agents, configuration reference |
+| [docs/PRODUCTION_ARCHITECTURE.md](docs/PRODUCTION_ARCHITECTURE.md) | Architecture decisions, controller comparison, dynamic NavMesh, migration guide |
+| [docs/GAME_SERVER_FAQ.md](docs/GAME_SERVER_FAQ.md) | Common integration questions |
+| [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md) | High-level overview for new contributors |
+| [Unity/QUICK_START.md](Unity/QUICK_START.md) | 5-minute Unity visualization setup |
+| [Unity/UNITY_SETUP_GUIDE.md](Unity/UNITY_SETUP_GUIDE.md) | Detailed Unity setup and troubleshooting |
+
+## Requirements
 
 - .NET 8.0 SDK
-- Windows, Linux, or macOS
 - (Optional) Unity 2021.3+ for visualization
 
-## 🏗️ Architecture
+## Dependencies
 
-```
-BepuPhysics v2.4.0
-    ↓ (static geometry)
-NavMesh Generation (DotRecast)
-    ↓ (walkable surface)
-Pathfinding
-    ↓ (waypoints)
-Movement Controller
-    ↓ (physics forces)
-Physics Simulation
-    ↓ (simulation state)
-Visualization Server (WebSocket)
-    ↓ (JSON updates)
-Unity Client (3D View)
-```
-
-## 🎯 Use Cases
-
-### Game Server Development
-- Server-authoritative physics
-- AI pathfinding for NPCs
-- Obstacle avoidance
-- Dynamic world navigation
-
-### Debugging & Testing
-- Visualize physics interactions
-- Verify pathfinding correctness
-- Tune movement parameters
-- Monitor performance
-
-### Rapid Prototyping
-- Fast iteration with Unity visualization
-- Test scenarios in 3D
-- Validate game mechanics
-- Demo to stakeholders
-
-## 🔑 Key Learnings
-
-### BepuPhysics v2.4.0
-- Requires explicit `SpringSettings(30f, 1f)` for contacts
-- Static bodies must use `simulation.Statics`
-- Bodies must be awakened when setting velocity
-- Low friction (0.1) needed for smooth character movement
-
-### DotRecast 2026.1.1
-- `RcSimpleInputGeomProvider` for geometry input
-- `RcBuilder.Build()` generates mesh data
-- `DtNavMeshBuilder.CreateNavMeshData()` creates queryable mesh
-- Proper cell size crucial for quality
-
-### Integration
-- Store shape indices in entities for navmesh extraction
-- Skip waypoints at same horizontal position
-- Use XZ distance for waypoint reach threshold
-- Broadcast state at 60 FPS for smooth visualization
-
-## 🌟 What's New in This Version
-
-### ⭐ Enhanced Simulation Test Suite
-- **Production-Ready Validation**: Comprehensive test with detailed metrics
-- **Multi-Agent Testing**: Test 1-10 agents simultaneously with diverse scenarios
-- **Direct NavMesh Generation**: 2x better quality than physics-based approach (~823 vs ~416 triangles)
-- **Performance Metrics**: Track generation time, success rates, path efficiency, agent speeds
-- **Flexible Configuration**: Configurable agent count, custom meshes, navmesh export
-
-**Quick Start**:
-```bash
-cd Spatial.TestHarness
-dotnet run -- enhanced              # Run with 5 agents (default)
-dotnet run -- enhanced 10           # Stress test with 10 agents
-dotnet run -- enhanced 1 --export-navmesh  # Debug + export
-```
-
-### Real-Time 3D Visualization
-- **WebSocket Server**: Broadcasts simulation state to Unity clients
-- **Unity Scripts**: Complete visualization system
-- **Entity Rendering**: See boxes, capsules, spheres in 3D
-- **NavMesh Display**: Green semi-transparent walkable surface
-- **Path Visualization**: Cyan lines with waypoint markers
-- **Velocity Vectors**: Yellow arrows showing movement direction
-
-### Benefits
-- **Faster Development**: See issues immediately
-- **Better Understanding**: Intuitive 3D view vs console numbers
-- **Easy Debugging**: Visual inspection of behavior
-- **Great Demos**: Show stakeholders real-time 3D simulation
-
-## 📝 License
-
-MIT License - See project for details
-
-## 🔗 Dependencies
-
-- [BepuPhysics v2](https://github.com/bepu/bepuphysics2) - High-performance physics engine
-- [DotRecast](https://github.com/ikpil/DotRecast) - C# port of Recast navigation
-- [Fleck](https://github.com/statianzo/Fleck) - WebSocket server
-- [Newtonsoft.Json](https://www.newtonsoft.com/json) - JSON serialization
-
-## 🤝 Contributing
-
-This is a complete, working integration. Feel free to:
-- Add more shape types
-- Implement dynamic obstacles
-- Add navmesh streaming
-- Enhance visualization
-- Optimize performance
-
----
-
-**Ready to see your simulation in 3D?** Check out [Unity/QUICK_START.md](Unity/QUICK_START.md)!
-
+- [BepuPhysics v2](https://github.com/bepu/bepuphysics2) — high-performance physics engine
+- [DotRecast](https://github.com/ikpil/DotRecast) — C# port of Recast/Detour navigation
+- [Fleck](https://github.com/statianzo/Fleck) — WebSocket server
+- [Newtonsoft.Json](https://www.newtonsoft.com/json) — JSON serialization

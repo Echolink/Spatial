@@ -167,6 +167,9 @@ namespace Spatial.Unity
         public bool IsStatic;
         public string ShapeType; // "Box", "Capsule", "Sphere", "Mesh"
         public MeshGeometry Mesh; // Optional mesh data for custom meshes
+        // Off-mesh link traversal — "none", "Jump", "Climb", "Teleport"
+        public string TraversalType = "none";
+        public float TraversalT = 0f; // normalized arc progress [0,1]
     }
     
     /// <summary>
