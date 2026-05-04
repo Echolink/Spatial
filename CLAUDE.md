@@ -16,6 +16,7 @@ dotnet run --project Spatial.TestHarness -- motor-vs-velocity # Controller compa
 dotnet run --project Spatial.TestHarness -- agent-collision
 dotnet run --project Spatial.TestHarness -- local-avoidance
 dotnet run --project Spatial.TestHarness -- path-validation
+dotnet run --project Spatial.TestHarness -- obstacle-rebake-visual  # tiled NavMesh rebake on obstacle spawn/despawn
 ```
 
 The test harness also starts a WebSocket visualization server on port 8181. Connect a Unity client (`Unity/QUICK_START.md`) for real-time 3D rendering.
@@ -60,6 +61,7 @@ Game Server Code
 - `FilterOccludedWalkableAreas()` prevents navmesh from generating under obstacles
 - `RcAreaModification(0x3f)` for walkable areas
 - `PathAutoFix = true` (default) inserts intermediate waypoints for steep segments
+- For runtime tile updates use `NavMeshConfiguration { EnableTileUpdates = true, TileSize = N }` and `BuildTiledNavMeshDirect`. Border size formula: `ceil(agentRadius / cellSize) + 3` — the `+3` is required for portal edges to survive contour simplification at tile boundaries.
 
 ## Git Conventions
 

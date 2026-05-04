@@ -1,6 +1,6 @@
 # Game Server Integration — FAQ
 
-**Related**: `GAME_SERVER_INTEGRATION.md`  
+**Related**: [`GAME_SERVER_INTEGRATION.md`](GAME_SERVER_INTEGRATION.md)  
 **Last Updated**: 2026-04-07
 
 ---
