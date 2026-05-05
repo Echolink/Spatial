@@ -1,6 +1,6 @@
 # Game Server Integration Guide
 
-**Last Updated**: 2026-04-19  
+**Last Updated**: 2026-05-05  
 **Status**: Production Ready  
 **Primary API**: `World` façade (`Spatial.Integration`)
 
@@ -455,8 +455,8 @@ Call these queries on your update tick to build the packet you send to clients.
 ### Position and velocity
 
 ```csharp
-// World-space position of the physics capsule CENTER.
-// To get feet position: pos.Y - (agentConfig.Height / 2 + agentConfig.Radius)
+// World-space foot position — Y is the bottom of the capsule (ground contact point).
+// Pass this directly to clients; no manual Y offset needed.
 Vector3 position = world.GetPosition(playerId);
 
 // Velocity in meters per second — useful for client-side interpolation and

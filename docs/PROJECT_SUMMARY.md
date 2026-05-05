@@ -125,4 +125,3 @@ See [GAME_SERVER_INTEGRATION.md](GAME_SERVER_INTEGRATION.md) for the full guide.
 | `CharacterController` (velocity-based) not formally `[Obsolete]` | Low |
 | `ValidateAndReplanIfNeeded()` is a placeholder | Medium |
 | Small agents (halfHeight ≤ 1.0) may bounce on flat planes — raycast self-hit bug | Medium |
-| `World.GetPosition` returns capsule center Y, not foot Y | Low |

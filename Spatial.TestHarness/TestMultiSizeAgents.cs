@@ -120,13 +120,11 @@ static class TestMultiSizeAgents
         var smallPos = world.GetPosition(1);
         var largePos = world.GetPosition(2);
 
-        float expectedSmallCenterOffset = SmallConfig.Height / 2f + SmallConfig.Radius; // 1.3
-        float expectedLargeCenterOffset = LargeConfig.Height / 2f + LargeConfig.Radius; // 2.05
+        Console.WriteLine($"  Small agent foot Y: {smallPos.Y:F2}");
+        Console.WriteLine($"  Large agent foot Y: {largePos.Y:F2}");
 
-        Console.WriteLine($"  Small agent center Y: {smallPos.Y:F2} (expected ~{expectedSmallCenterOffset:F2} above ground)");
-        Console.WriteLine($"  Large agent center Y: {largePos.Y:F2} (expected ~{expectedLargeCenterOffset:F2} above ground)");
-
-        Assert(largePos.Y > smallPos.Y + 0.5f, "large agent capsule center is higher than small agent");
+        Assert(smallPos.Y < 0.3f, "small agent foot should be near ground");
+        Assert(largePos.Y < 0.3f, "large agent foot should be near ground");
         Console.WriteLine("[PASS] CapsuleSizingPerEntity");
     }
 

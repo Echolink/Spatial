@@ -340,6 +340,10 @@ public sealed class World : IDisposable
         var (shape, inertia) = Physics.CreateCapsuleShapeWithInertia(
             agentConfig.Radius, agentConfig.Height, mass: 1f);
 
+        // Zero angular inertia so physics contacts can never tip the capsule.
+        // Facing direction is tracked separately in gameplay logic.
+        inertia.InverseInertiaTensor = default;
+
         var entity = Physics.RegisterEntityWithInertia(
             entityId, entityType, center, shape, inertia);
 
@@ -600,9 +604,18 @@ public sealed class World : IDisposable
     /// </summary>
     public Vector3 GetPosition(int entityId)
     {
-        if (_entities.TryGetValue(entityId, out var entity))
-            return Physics.GetEntityPosition(entity);
-        return Vector3.Zero;
+        if (!_entities.TryGetValue(entityId, out var entity))
+            return Vector3.Zero;
+
+        var center = Physics.GetEntityPosition(entity);
+
+        if (_entityConfigs.TryGetValue(entityId, out var cfg))
+        {
+            float halfHeight = (cfg.Height / 2f) + cfg.Radius;
+            return new Vector3(center.X, center.Y - halfHeight, center.Z);
+        }
+
+        return center;
     }
 
     /// <summary>
