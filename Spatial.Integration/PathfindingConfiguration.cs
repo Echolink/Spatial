@@ -44,9 +44,9 @@ public class PathfindingConfiguration
     /// <summary>
     /// Distance threshold for reaching final destination (units).
     /// Can be smaller than waypoint threshold for more precision.
-    /// Default: 0.3 units
+    /// Default: 0.1 units
     /// </summary>
-    public float DestinationReachedThreshold { get; set; } = 0.3f;
+    public float DestinationReachedThreshold { get; set; } = 0.1f;
     
     /// <summary>
     /// Whether to enable local avoidance.

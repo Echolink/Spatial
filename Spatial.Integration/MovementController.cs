@@ -587,10 +587,29 @@ public class MovementController
         if (currentState == CharacterState.LINK_TRAVERSAL)
             return;
         
-        // If movement is completed, let physics settle and sleep naturally.
-        // Idle grounding handles drift; forcing velocity here would wake the body every tick.
         if (state.IsCompleted)
+        {
+            // Zero any downward gravity accumulation so the agent doesn't slowly sink.
+            var vel = _physicsWorld.GetEntityVelocity(entity);
+            if (vel.Y < 0f)
+                _physicsWorld.SetEntityVelocity(entity, new Vector3(vel.X, 0f, vel.Z));
+
+            // If the capsule lost ground contact after arrival, snap it back to the surface.
+            if (_characterController.IsAirborne(entity) && Math.Abs(vel.Y) <= RecoveryVelocityThreshold)
+            {
+                var rayStart = new Vector3(currentPosition.X, currentPosition.Y + agentHalfHeight + 0.1f, currentPosition.Z);
+                var rayEnd   = new Vector3(currentPosition.X, currentPosition.Y - (agentHalfHeight + 3.0f), currentPosition.Z);
+                if (_physicsWorld.Raycast(rayStart, rayEnd, out var hit, out _) && hit.Y < currentPosition.Y)
+                {
+                    float targetCenterY = hit.Y + agentHalfHeight;
+                    if (Math.Abs(currentPosition.Y - targetCenterY) > 0.05f)
+                        _physicsWorld.SetEntityPosition(entity, new Vector3(currentPosition.X, targetCenterY, currentPosition.Z));
+                    _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
+                    _characterController.SetGrounded(entity);
+                }
+            }
             return;
+        }
         
         // Check if we've completed the path
         if (state.CurrentWaypointIndex >= state.Waypoints.Count)
@@ -1309,16 +1328,24 @@ public class MovementController
     /// </summary>
     private void CompleteMovement(PhysicsEntity entity, MovementState state)
     {
-        var finalPosition = _physicsWorld.GetEntityPosition(entity);
-        
-        // FIXED: Keep agent in tracking to continue applying Y correction
-        // Mark as completed so we stop pathfinding but continue height correction
         state.IsCompleted = true;
-        
-        // Stop all velocity
         _physicsWorld.SetEntityVelocity(entity, Vector3.Zero);
-        
-        // Fire completion event
+
+        // Snap XZ to the exact navmesh-snapped target to eliminate arrival-threshold error.
+        // The threshold check stops the agent when "close enough"; this removes the remaining gap.
+        // Only snap if the error is small (< 0.5m) — large gaps indicate something went wrong.
+        var currentPosition = _physicsWorld.GetEntityPosition(entity);
+        float xzError = MathF.Sqrt(
+            (currentPosition.X - state.TargetPosition.X) * (currentPosition.X - state.TargetPosition.X) +
+            (currentPosition.Z - state.TargetPosition.Z) * (currentPosition.Z - state.TargetPosition.Z));
+        if (xzError > 0.001f && xzError < 0.5f)
+        {
+            float agentHalfHeight = (state.AgentHeight * 0.5f) + state.AgentRadius;
+            var exactPos = new Vector3(state.TargetPosition.X, state.TargetPosition.Y + agentHalfHeight, state.TargetPosition.Z);
+            _physicsWorld.SetEntityPosition(entity, exactPos);
+        }
+
+        var finalPosition = _physicsWorld.GetEntityPosition(entity);
         Console.WriteLine($"[MovementController] Entity {entity.EntityId} reached destination");
         OnDestinationReached?.Invoke(entity.EntityId, finalPosition);
         OnMovementProgress?.Invoke(entity.EntityId, 1.0f);

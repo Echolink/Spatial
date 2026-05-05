@@ -377,15 +377,18 @@ public class PhysicsWorld : IDisposable
     /// </summary>
     public TypedIndex CreateCapsuleShape(float radius, float length)
     {
+        // BepuPhysics Capsule(radius, length): 'length' is the full cylinder length.
+        // Internally stored as HalfLength = length/2. Total half-extent = length/2 + radius.
         var capsule = new Capsule(radius, length);
         return _simulation.Shapes.Add(capsule);
     }
-    
+
     /// <summary>
     /// Creates a capsule shape and computes its inertia for the given mass.
     /// </summary>
     public (TypedIndex ShapeIndex, BodyInertia Inertia) CreateCapsuleShapeWithInertia(float radius, float length, float mass)
     {
+        // BepuPhysics Capsule(radius, length): 'length' is the full cylinder length.
         var capsule = new Capsule(radius, length);
         var inertia = capsule.ComputeInertia(mass);
         var shapeIndex = _simulation.Shapes.Add(capsule);
